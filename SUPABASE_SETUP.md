@@ -15,12 +15,16 @@ Your Supabase database is missing the `files` table. Follow these steps to creat
 Copy and paste this SQL into the editor and click **Run**:
 
 ```sql
+-- Enable pgvector extension for vector similarity search
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- Create the files table
 CREATE TABLE IF NOT EXISTS public.files (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   filename TEXT NOT NULL,
   path TEXT,
   info JSONB,
+  embedding vector(1536), -- Vector embeddings for semantic search (1536 for OpenAI, adjust for other models)
   created_at TIMESTAMPTZ DEFAULT NOW(),
   reprocessed_at TIMESTAMPTZ
 );
@@ -30,6 +34,12 @@ CREATE INDEX IF NOT EXISTS idx_files_filename ON public.files(filename);
 
 -- Create an index on created_at for faster sorting
 CREATE INDEX IF NOT EXISTS idx_files_created_at ON public.files(created_at DESC);
+
+-- Create HNSW index for vector similarity search (pgvector)
+-- This enables fast approximate nearest neighbor search
+CREATE INDEX IF NOT EXISTS idx_files_embedding ON public.files 
+USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
 
 -- Enable Row Level Security (optional, but recommended)
 ALTER TABLE public.files ENABLE ROW LEVEL SECURITY;
@@ -42,6 +52,14 @@ FOR ALL
 USING (true) 
 WITH CHECK (true);
 ```
+
+**Note on embedding dimensions:**
+- OpenAI `text-embedding-3-small`: 1536 dimensions
+- OpenAI `text-embedding-3-large`: 3072 dimensions  
+- OpenAI `text-embedding-ada-002`: 1536 dimensions
+- Local models (e.g., `Xenova/all-MiniLM-L6-v2`): 384 dimensions
+
+If using a different embedding model, adjust the `vector(1536)` dimension accordingly.
 
 ### Step 3: Verify the Table
 
@@ -100,8 +118,37 @@ If you get permission errors, you may need to:
 - **filename**: The uploaded file name
 - **path**: File path in storage (usually same as filename)
 - **info**: JSONB field storing all file metadata (type, summary, highlights, etc.)
+- **embedding**: Vector embedding for AI-powered semantic search (pgvector)
 - **created_at**: When the file was uploaded
 - **reprocessed_at**: When the file was last reprocessed (if applicable)
 
+## Vector Search Features
+
+After setting up the embeddings column, your app will automatically:
+
+1. **Generate embeddings** when files are uploaded or reprocessed
+2. **Enable semantic search** - search files by meaning, not just keywords
+3. **Power recommendations** - find related files using vector similarity
+4. **Fast similarity search** - HNSW index enables millisecond search times
+
+### How Vector Search Works
+
+- When you upload a file, the system extracts text/metadata and generates a vector embedding
+- Embeddings are stored in the `embedding` column using pgvector
+- When you search, your query is converted to an embedding and compared using cosine similarity
+- Results are ranked by semantic similarity, not just keyword matching
+
+### Testing Vector Search
+
+1. Upload several files with related content (e.g., budget documents, product images)
+2. Use the search bar on the dashboard
+3. Try semantic queries like "financial analysis" or "product photos"
+4. Results will show similarity scores (higher = more relevant)
+
 After creating this table, your uploaded files will be saved to the database and will persist after page refreshes!
+
+
+
+
+
 

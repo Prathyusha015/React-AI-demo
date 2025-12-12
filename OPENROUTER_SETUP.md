@@ -119,3 +119,8 @@ When deploying to production (Vercel, Netlify, etc.):
 
 The app will automatically use the production environment variable.
 
+
+
+
+
+

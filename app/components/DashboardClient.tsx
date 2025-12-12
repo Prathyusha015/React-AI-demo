@@ -36,6 +36,10 @@ export default function DashboardClient() {
   const [signedUrls, setSignedUrls] = useState<Record<string,string>>({});
   const [processingStatus, setProcessingStatus] = useState<Record<string, string>>({});
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Array<any>>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSearchResults, setShowSearchResults] = useState(false);
 
   // Auto-refresh files list
   useEffect(() => {
@@ -91,13 +95,47 @@ export default function DashboardClient() {
     setSelected(filename);
     setRecommended([]);
     try {
-      const res = await fetch(`/api/recommend?file=${encodeURIComponent(filename)}`);
+      const provider = localStorage.getItem('llmProvider') || 'ondevice';
+      const model = localStorage.getItem('openRouterModel') || undefined;
+      const res = await fetch(`/api/recommend?file=${encodeURIComponent(filename)}&vector=true&provider=${provider}${model ? `&model=${encodeURIComponent(model)}` : ''}`);
       const json = await res.json();
       if (json?.recommendations) setRecommended(json.recommendations || []);
     } catch (err) {
       console.error('Recommendations error:', err);
     }
   }
+
+  async function performSearch(query: string) {
+    if (!query || query.trim().length === 0) {
+      setSearchResults([]);
+      setShowSearchResults(false);
+      return;
+    }
+
+    setIsSearching(true);
+    setShowSearchResults(true);
+    try {
+      const provider = localStorage.getItem('llmProvider') || 'ondevice';
+      const model = localStorage.getItem('openRouterModel') || undefined;
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&limit=10&provider=${provider}${model ? `&model=${encodeURIComponent(model)}` : ''}`);
+      const json = await res.json();
+      if (json?.results) {
+        setSearchResults(json.results || []);
+      } else {
+        setSearchResults([]);
+      }
+    } catch (err) {
+      console.error('Search error:', err);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    performSearch(searchQuery);
+  };
 
   async function reprocessFile(filename: string) {
     setProcessingStatus(prev => ({ ...prev, [filename]: 'processing' }));
@@ -214,6 +252,82 @@ export default function DashboardClient() {
 
   return (
     <div className="space-y-6">
+      {/* Vector Search Bar */}
+      <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg p-4 border border-blue-200">
+        <form onSubmit={handleSearchSubmit} className="flex gap-2">
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (e.target.value.trim().length === 0) {
+                  setShowSearchResults(false);
+                }
+              }}
+              placeholder="🔍 Search files using AI-powered vector search... (e.g., 'budget analysis', 'product images', 'sales data')"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {isSearching && (
+              <div className="absolute right-3 top-2.5">
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+              </div>
+            )}
+          </div>
+          <button
+            type="submit"
+            disabled={isSearching || !searchQuery.trim()}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+          >
+            Search
+          </button>
+        </form>
+        
+        {/* Search Results */}
+        {showSearchResults && searchResults.length > 0 && (
+          <div className="mt-4 space-y-2">
+            <div className="text-sm font-semibold text-gray-700 mb-2">
+              Found {searchResults.length} result{searchResults.length !== 1 ? 's' : ''} (Vector Similarity Search)
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-64 overflow-y-auto">
+              {searchResults.map((result: any, idx: number) => (
+                <div
+                  key={idx}
+                  onClick={() => {
+                    setSelected(result.filename);
+                    fetchRecommendations(result.filename);
+                    setShowSearchResults(false);
+                  }}
+                  className="bg-white p-3 rounded border border-gray-200 hover:border-blue-400 hover:shadow-md cursor-pointer transition-all"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="font-medium text-sm text-gray-900 truncate">
+                        {result.filename}
+                      </div>
+                      {result.info?.summary && (
+                        <div className="text-xs text-gray-600 mt-1 line-clamp-2">
+                          {result.info.summary.substring(0, 100)}...
+                        </div>
+                      )}
+                    </div>
+                    <div className="ml-2 text-xs font-semibold text-blue-600">
+                      {(result.similarity * 100).toFixed(0)}% match
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {showSearchResults && !isSearching && searchResults.length === 0 && searchQuery.trim().length > 0 && (
+          <div className="mt-4 text-sm text-gray-500 text-center py-2">
+            No results found. Try different keywords or upload more files.
+          </div>
+        )}
+      </div>
+
       {/* Status Bar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">

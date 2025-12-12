@@ -4,6 +4,7 @@ import path from 'path';
 import { NextResponse } from 'next/server';
 import { processFile } from '../../../lib/processors';
 import { supabaseServer } from '../../../lib/supabaseServer';
+import { processAndStoreEmbedding } from '../../../lib/embeddingStorage';
 
 export async function POST(request: Request) {
   try {
@@ -96,6 +97,19 @@ export async function POST(request: Request) {
               dbId: dbData[0]?.id 
             };
             console.log('File inserted to DB:', filename, 'ID:', dbData[0]?.id);
+            
+            // Generate and store embedding for vector search (async, don't block)
+            processAndStoreEmbedding(info, filename, provider as 'ondevice' | 'openrouter', model || undefined)
+              .then(success => {
+                if (success) {
+                  console.log('Embedding generated and stored for:', filename);
+                } else {
+                  console.warn('Failed to generate/store embedding for:', filename);
+                }
+              })
+              .catch(err => {
+                console.error('Error generating embedding:', err);
+              });
           } else {
             console.warn('DB insert returned no data for:', filename);
             results[results.length - 1] = { 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { summarize, extractHighlights, analyzeImage, analyzeVideo } from './llm';
+import { generateEmbedding, generateEmbeddingText } from './embeddings';
 
 type LLMProvider = 'ondevice' | 'openrouter';
 

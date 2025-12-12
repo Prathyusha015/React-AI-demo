@@ -4,6 +4,7 @@ import path from 'path';
 import { NextResponse } from 'next/server';
 import { processFile } from '../../../lib/processors';
 import { supabaseServer } from '../../../lib/supabaseServer';
+import { processAndStoreEmbedding } from '../../../lib/embeddingStorage';
 
 export async function POST(request: Request) {
   try {
@@ -68,6 +69,17 @@ export async function POST(request: Request) {
         // update DB row if exists
         try {
           await supabase.from('files').update({ info, reprocessed_at: new Date().toISOString() }).eq('filename', filename);
+          
+          // Regenerate and store embedding
+          processAndStoreEmbedding(info, filename as string, provider as 'ondevice' | 'openrouter', model || undefined)
+            .then(success => {
+              if (success) {
+                console.log('Embedding regenerated for:', filename);
+              }
+            })
+            .catch(err => {
+              console.error('Error regenerating embedding:', err);
+            });
         } catch (e) {}
 
         try { await fs.promises.unlink(tmpPath); } catch (e) {}
@@ -95,6 +107,9 @@ export async function POST(request: Request) {
     try {
       const metaPath = path.join(uploadDir, `${filename}.meta.json`);
       await fs.promises.writeFile(metaPath, JSON.stringify({ filename, info, reprocessedAt: new Date().toISOString() }, null, 2));
+      
+      // For local storage, embeddings are stored in metadata cache
+      // (Vector search will work with Supabase, but we can still generate embeddings locally)
     } catch (e) {}
 
     return NextResponse.json({ success: true, filename, info });

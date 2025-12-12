@@ -1,12 +1,114 @@
 // AI-powered recommendation system with semantic similarity and cross-modal matching
-export function recommendFiles(files: Array<{ filename: string; info: any }>, target?: { filename?: string; info?: any }) {
+import { generateEmbeddingText, cosineSimilarity } from './embeddings';
+import { generateEmbedding } from './embeddings';
+
+type EmbeddingProvider = 'ondevice' | 'openrouter';
+
+/**
+ * AI-powered recommendation system with vector similarity support
+ * Uses vector embeddings when available, falls back to heuristic matching
+ */
+export async function recommendFiles(
+  files: Array<{ filename: string; info: any; embedding?: number[] }>, 
+  target?: { filename?: string; info?: any; embedding?: number[] },
+  useVectorSearch: boolean = true,
+  provider: EmbeddingProvider = 'ondevice',
+  model?: string
+): Promise<Array<{ filename: string; info: any }>> {
   if (!files || !files.length) return [];
 
   // Filter out the target file itself
   const otherFiles = files.filter(f => f.filename !== target?.filename);
   if (otherFiles.length === 0) return [];
 
-  // If target provided, use AI-powered semantic similarity
+  // If target provided and vector search enabled, try vector similarity first
+  if (target?.info && useVectorSearch) {
+    try {
+      // Try vector-based recommendations if embeddings are available
+      const targetEmbedding = target.embedding;
+      
+      if (targetEmbedding && targetEmbedding.length > 0) {
+        // Calculate vector similarity for all files with embeddings
+        const vectorScored = otherFiles
+          .map(f => {
+            if (!f.embedding || f.embedding.length === 0) return null;
+            
+            const similarity = cosineSimilarity(targetEmbedding, f.embedding);
+            return {
+              file: f,
+              similarity,
+              vectorBased: true
+            };
+          })
+          .filter((item): item is { file: any; similarity: number; vectorBased: boolean } => 
+            item !== null && item.similarity > 0.1
+          )
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, 5);
+
+        // If we have good vector-based results, return them
+        if (vectorScored.length > 0) {
+          return vectorScored.map(item => ({
+            filename: item.file.filename,
+            info: item.file.info
+          }));
+        }
+      }
+
+      // If target doesn't have embedding, try to generate one
+      if (!targetEmbedding) {
+        const embeddingText = generateEmbeddingText(target.info);
+        if (embeddingText && embeddingText !== 'No content available') {
+          const generatedEmbedding = await generateEmbedding(embeddingText, provider, model);
+          
+          if (generatedEmbedding && generatedEmbedding.length > 0) {
+            // Calculate similarity with generated embedding
+            const vectorScored = await Promise.all(
+              otherFiles.map(async (f) => {
+                let fileEmbedding = f.embedding;
+                
+                // Generate embedding for file if not available
+                if (!fileEmbedding) {
+                  const fileEmbeddingText = generateEmbeddingText(f.info);
+                  if (fileEmbeddingText && fileEmbeddingText !== 'No content available') {
+                    fileEmbedding = await generateEmbedding(fileEmbeddingText, provider, model);
+                  }
+                }
+                
+                if (!fileEmbedding || fileEmbedding.length === 0) return null;
+                
+                const similarity = cosineSimilarity(generatedEmbedding, fileEmbedding);
+                return {
+                  file: f,
+                  similarity,
+                  vectorBased: true
+                };
+              })
+            );
+
+            const validResults = vectorScored
+              .filter((item): item is { file: any; similarity: number; vectorBased: boolean } => 
+                item !== null && item.similarity > 0.1
+              )
+              .sort((a, b) => b.similarity - a.similarity)
+              .slice(0, 5);
+
+            if (validResults.length > 0) {
+              return validResults.map(item => ({
+                filename: item.file.filename,
+                info: item.file.info
+              }));
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Vector-based recommendation failed, falling back to heuristic:', err);
+      // Fall through to heuristic matching
+    }
+  }
+
+  // Fallback to heuristic-based recommendations
   if (target?.info) {
     const scores = otherFiles.map(f => {
       let score = 0;
