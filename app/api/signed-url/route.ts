@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
-import getSupabaseClient from '../../../lib/supabase';
+import { supabaseServer } from '../../../lib/supabaseServer';
 
 export async function GET(request: Request) {
   try {
@@ -9,7 +9,7 @@ export async function GET(request: Request) {
     const ttl = Number(url.searchParams.get('ttl') || '60');
     if (!file) return NextResponse.json({ error: 'missing file' }, { status: 400 });
 
-    const supabase = await getSupabaseClient();
+    const supabase = supabaseServer();
     if (!supabase) return NextResponse.json({ error: 'supabase not configured' }, { status: 404 });
 
     // create a signed URL for the uploads bucket

@@ -3,16 +3,19 @@ import fs from 'fs';
 import path from 'path';
 import { NextResponse } from 'next/server';
 import { processFile } from '../../../lib/processors';
-import getSupabaseClient from '../../../lib/supabase';
+import { supabaseServer } from '../../../lib/supabaseServer';
 
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const files = formData.getAll('files');
+    // Get LLM provider preference from form data (default to 'ondevice')
+    const provider = (formData.get('provider') as string) || 'ondevice';
+    const model = formData.get('model') as string | null;
 
     const uploadDir = path.join(process.cwd(), 'public', 'uploads');
     await fs.promises.mkdir(uploadDir, { recursive: true });
-    const supabase = await getSupabaseClient();
+    const supabase = supabaseServer();
     const tmpDir = path.join(process.cwd(), 'tmp', 'uploads');
     await fs.promises.mkdir(tmpDir, { recursive: true });
 
@@ -25,31 +28,89 @@ export async function POST(request: Request) {
       const name = file.name || `file-${Date.now()}`;
       const arrayBuffer = await file.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
+      
+      // File size validation (50MB limit for demo safety)
+      const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+      if (buffer.length > MAX_FILE_SIZE) {
+        results.push({ 
+          filename: name, 
+          error: `File too large. Maximum size is ${MAX_FILE_SIZE / (1024 * 1024)}MB` 
+        });
+        continue;
+      }
+      
       const filename = `${Date.now()}-${name.replace(/\s+/g, '_')}`;
       // If Supabase is configured, process locally and upload to Supabase storage + insert DB row
       if (supabase) {
         const tmpPath = path.join(tmpDir, filename);
         await fs.promises.writeFile(tmpPath, buffer);
-        const info = await processFile(tmpPath, (file as any).type);
+        const info = await processFile(tmpPath, (file as any).type, provider as 'ondevice' | 'openrouter', model || undefined);
 
         // Upload to Supabase storage (bucket: uploads)
+        let storageUploaded = false;
+        let storageError: string | null = null;
         try {
-          const { error: upErr } = await supabase.storage.from('uploads').upload(filename, buffer, { contentType: (file as any).type });
+          const { data: uploadData, error: upErr } = await supabase.storage.from('uploads').upload(filename, buffer, { contentType: (file as any).type });
           if (upErr) {
-            // still continue but include upload error in response
-            results.push({ filename, info, supabaseUploadError: upErr.message });
+            storageError = upErr.message;
+            results.push({ filename, info, supabaseStorageError: upErr.message });
           } else {
-            results.push({ filename, info, uploaded: true });
+            storageUploaded = true;
+            results.push({ filename, info, uploadedToStorage: true, storagePath: uploadData?.path });
           }
         } catch (e: any) {
-          results.push({ filename, info, supabaseUploadError: String(e) });
+          storageError = String(e);
+          results.push({ filename, info, supabaseStorageError: String(e) });
         }
 
         // Try to insert metadata row into 'files' table (if present)
+        let dbInserted = false;
+        let dbError: string | null = null;
         try {
-          await supabase.from('files').insert([{ filename, path: filename, info, created_at: new Date().toISOString() }]);
-        } catch (e) {
-          // ignore DB insert failures
+          // Ensure info is properly serialized for JSONB
+          const dbPayload = {
+            filename,
+            path: filename,
+            info: info || {},
+            created_at: new Date().toISOString()
+          };
+          
+          const { data: dbData, error: dbErr } = await supabase
+            .from('files')
+            .insert([dbPayload])
+            .select();
+            
+          if (dbErr) {
+            dbError = dbErr.message;
+            console.error('Supabase DB insert error:', dbErr);
+            results[results.length - 1] = { 
+              ...results[results.length - 1], 
+              supabaseDbError: dbErr.message,
+              supabaseDbErrorDetails: dbErr
+            };
+          } else if (dbData && dbData.length > 0) {
+            dbInserted = true;
+            results[results.length - 1] = { 
+              ...results[results.length - 1], 
+              insertedToDb: true, 
+              dbId: dbData[0]?.id 
+            };
+            console.log('File inserted to DB:', filename, 'ID:', dbData[0]?.id);
+          } else {
+            console.warn('DB insert returned no data for:', filename);
+            results[results.length - 1] = { 
+              ...results[results.length - 1], 
+              supabaseDbWarning: 'Insert succeeded but no data returned'
+            };
+          }
+        } catch (e: any) {
+          dbError = String(e);
+          console.error('DB insert exception:', e);
+          results[results.length - 1] = { 
+            ...results[results.length - 1], 
+            supabaseDbError: String(e),
+            supabaseDbException: e
+          };
         }
 
         // remove tmp file
@@ -58,7 +119,7 @@ export async function POST(request: Request) {
         const filePath = path.join(uploadDir, filename);
         await fs.promises.writeFile(filePath, buffer);
 
-        const info = await processFile(filePath, (file as any).type);
+        const info = await processFile(filePath, (file as any).type, provider as 'ondevice' | 'openrouter', model || undefined);
         results.push({ filename, info });
 
         // Cache metadata next to the file for faster listing and to avoid re-running heavy work

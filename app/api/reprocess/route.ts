@@ -3,15 +3,17 @@ import fs from 'fs';
 import path from 'path';
 import { NextResponse } from 'next/server';
 import { processFile } from '../../../lib/processors';
-import getSupabaseClient from '../../../lib/supabase';
+import { supabaseServer } from '../../../lib/supabaseServer';
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const filename = body?.file;
+    const provider = body?.provider || 'ondevice';
+    const model = body?.model || null;
     if (!filename) return NextResponse.json({ error: 'missing file' }, { status: 400 });
 
-    const supabase = await getSupabaseClient();
+    const supabase = supabaseServer();
     // If Supabase configured, download file from storage, process, and update DB
     if (supabase) {
       try {
@@ -52,7 +54,16 @@ export async function POST(request: Request) {
         const tmpPath = path.join(tmpDir, filename as string);
         await fs.promises.writeFile(tmpPath, buffer);
 
-        const info = await processFile(tmpPath);
+        // Determine mime type from filename extension
+        const ext = path.extname(filename as string).toLowerCase();
+        let mimeType: string | undefined;
+        if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) mimeType = 'image';
+        else if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) mimeType = 'video';
+        else if (ext === '.pdf') mimeType = 'application/pdf';
+        else if (ext === '.txt') mimeType = 'text/plain';
+        else if (ext === '.csv') mimeType = 'text/csv';
+
+        const info = await processFile(tmpPath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
 
         // update DB row if exists
         try {
@@ -71,7 +82,16 @@ export async function POST(request: Request) {
     const filePath = path.join(uploadDir, filename);
     if (!fs.existsSync(filePath)) return NextResponse.json({ error: 'file not found' }, { status: 404 });
 
-    const info = await processFile(filePath);
+    // Determine mime type from filename extension
+    const ext = path.extname(filename).toLowerCase();
+    let mimeType: string | undefined;
+    if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) mimeType = 'image';
+    else if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) mimeType = 'video';
+    else if (ext === '.pdf') mimeType = 'application/pdf';
+    else if (ext === '.txt') mimeType = 'text/plain';
+    else if (ext === '.csv') mimeType = 'text/csv';
+
+    const info = await processFile(filePath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
     try {
       const metaPath = path.join(uploadDir, `${filename}.meta.json`);
       await fs.promises.writeFile(metaPath, JSON.stringify({ filename, info, reprocessedAt: new Date().toISOString() }, null, 2));

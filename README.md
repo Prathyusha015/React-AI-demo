@@ -3,17 +3,30 @@
 This prototype demonstrates a small Next.js (app-router) demo for multi-modal AI-powered dashboards: upload documents, images, and videos and get lightweight AI-driven summaries, visualizations, and recommendations.
 
 Key features in this prototype
-- Upload files (PDF, TXT, CSV, images, videos) via the UI; files are saved to `public/uploads`.
-- Lightweight processors in `lib/processors.ts` extract simple summaries, CSV stats, and basic image captions (stubs/prototypes).
-- Dashboard (`app/components/DashboardClient.tsx`) shows a pie chart of file types and lists processed metadata.
-- Simple recommendations via `lib/recommender.ts` and API at `/api/recommend`.
+- **Multi-page Navigation**: Separate routes for Dashboard (`/`), Upload (`/upload`), and Settings (`/settings`)
+- **Dual LLM Support**: Choose between on-device LLM (using @xenova/transformers) or OpenRouter API for AI processing
+- **Upload files** (PDF, TXT, CSV, images, videos) via the UI; files are saved to `public/uploads` or Supabase Storage
+- **Lightweight processors** in `lib/processors.ts` extract simple summaries, CSV stats, and basic image captions
+- **Dashboard** shows a pie chart of file types and lists processed metadata with AI provider indicators
+- **Simple recommendations** via `lib/recommender.ts` and API at `/api/recommend`
+- **Settings page** to configure LLM provider (on-device vs OpenRouter) and model selection
 
 What I changed / added
-- `app/api/upload/route.ts` — file upload endpoint (saves to `public/uploads`).
-- `lib/processors.ts` — simple processors for text, CSV, PDF (stub), images, videos.
-- `app/components/UploadClient.tsx` — client upload UI + progress.
-- `app/api/list/route.ts` — list uploaded files and processed info.
-- `app/components/DashboardClient.tsx` — dashboard with Chart.js pie chart and file list.
+- **Navigation**: `app/components/Navigation.tsx` — multi-page navigation component
+- **Pages**: 
+  - `app/page.tsx` — Dashboard home page
+  - `app/upload/page.tsx` — Dedicated upload page
+  - `app/settings/page.tsx` — Settings page with LLM provider toggle
+- **LLM Integration**:
+  - `app/api/llm/route.ts` — OpenRouter API integration endpoint
+  - `lib/llm.ts` — Updated to support both on-device and OpenRouter providers
+- **File Processing**:
+  - `app/api/upload/route.ts` — file upload endpoint with LLM provider support
+  - `app/api/reprocess/route.ts` — reprocess files with selected LLM provider
+  - `lib/processors.ts` — processors accept provider parameter for LLM selection
+- **Components**:
+  - `app/components/UploadClient.tsx` — client upload UI with provider preference
+  - `app/components/DashboardClient.tsx` — dashboard with provider indicators
 - `lib/recommender.ts` & `app/api/recommend/route.ts` — lightweight recommendation stub and endpoint.
 - `package.json` — added `chart.js` and `react-chartjs-2` to dependencies.
 
@@ -31,9 +44,23 @@ npm install
 npm run dev
 ```
 
-3. Open in browser
+3. (Optional) Configure OpenRouter API Key
 
-Visit `http://localhost:3000` and use the Upload panel to add files. Uploaded files will appear in the Dashboard panel with extracted info. Files are stored under `public/uploads`.
+If you want to use OpenRouter API instead of on-device LLM:
+- Get your API key from [openrouter.ai/keys](https://openrouter.ai/keys)
+- Add to `.env.local`: `OPENROUTER_API_KEY=sk-or-v1-...`
+- Restart your dev server after adding the key
+- Go to Settings page (`/settings`) to select OpenRouter and choose a model
+- See [OPENROUTER_SETUP.md](./OPENROUTER_SETUP.md) for detailed instructions
+
+4. Open in browser
+
+Visit `http://localhost:3000`:
+- **Dashboard** (`/`) — View all uploaded files and AI insights
+- **Upload** (`/upload`) — Upload new files for processing
+- **Settings** (`/settings`) — Configure LLM provider (on-device or OpenRouter) and model selection
+
+Files are stored under `public/uploads` or in Supabase Storage if configured.
 
 Notes & caveats
 - PDF extraction is a stub in `lib/processors.ts`. For richer PDF text extraction consider adding `pdf-parse` or `pdfjs-dist` and updating `processPDF`.
@@ -93,26 +120,45 @@ This prototype supports using Supabase Storage + Postgres for file storage and m
 Quick setup steps:
 
 1. Create a Supabase project and a Storage bucket named `uploads`.
-2. (Optional but recommended) Create a `files` table:
+2. **IMPORTANT: Create the `files` table** (required for database persistence):
+
+Run this SQL in your Supabase SQL Editor:
 
 ```sql
-create table files (
-	id uuid primary key default gen_random_uuid(),
-	filename text not null,
-	path text,
-	info jsonb,
-	created_at timestamptz default now(),
-	reprocessed_at timestamptz
+CREATE TABLE IF NOT EXISTS public.files (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  filename TEXT NOT NULL,
+  path TEXT,
+  info JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  reprocessed_at TIMESTAMPTZ
 );
+
+-- Optional: Add indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_files_filename ON public.files(filename);
+CREATE INDEX IF NOT EXISTS idx_files_created_at ON public.files(created_at DESC);
 ```
 
-3. Add environment variables to `ai-demo/.env.local` (or your deployment environment):
+**See [SUPABASE_SETUP.md](./SUPABASE_SETUP.md) for detailed setup instructions.**
 
-```
-SUPABASE_URL=https://your-project-ref.supabase.co
+3. Add environment variables to `.env.local` (or your deployment environment):
+
+**All environment variables are OPTIONAL** - the app works without any of them (uses local storage and on-device LLM by default).
+
+```bash
+# Optional: Supabase for cloud storage (if not set, uses local public/uploads)
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_KEY=your_service_role_key_here
-# or
-SUPABASE_ANON_KEY=your_anon_key_here
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
+
+# Optional: OpenRouter API for cloud-based LLM (if not set, uses on-device LLM)
+OPENROUTER_API_KEY=sk-or-v1-...
+
+# Optional: Custom app URL for OpenRouter referer header
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+# Optional: Custom on-device model for summarization
+SUMMARY_MODEL=Xenova/distilbart-cnn-12-6
 ```
 
 4. Install dependencies and run the dev server from the `ai-demo` folder:
