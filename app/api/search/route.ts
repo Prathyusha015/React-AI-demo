@@ -27,14 +27,24 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Query parameter "q" is required' }, { status: 400 });
     }
 
+
+
+    console.log(`Generating embedding for query: "${query}" using ${provider}...`);
     // Generate embedding for the search query
-    const queryEmbedding = await generateEmbedding(query, provider, model);
-    
-    if (!queryEmbedding || queryEmbedding.length === 0) {
-      return NextResponse.json({ 
-        error: 'Failed to generate embedding for query',
-        results: []
-      }, { status: 500 });
+    let queryEmbedding: number[] | null = null;
+    try {
+      queryEmbedding = await generateEmbedding(query, provider, model);
+    } catch (e) {
+      console.warn('Embedding generation failed, falling back to keyword search:', e);
+    }
+
+    // Note: We no longer exit here if embedding is null. We continue to allow keyword fallback.
+    // if (!queryEmbedding || queryEmbedding.length === 0) { ... }
+
+    if (queryEmbedding) {
+      console.log('Query embedding generated successfully.');
+    } else {
+      console.log('Proceeding with keyword-only search.');
     }
 
     const supabase = supabaseServer();
@@ -61,14 +71,44 @@ export async function GET(request: Request) {
               if (!file.embedding || !Array.isArray(file.embedding)) {
                 return null;
               }
-              const similarity = cosineSimilarity(queryEmbedding, file.embedding);
-              return {
-                filename: file.filename,
-                info: file.info,
-                similarity
-              };
+              let similarity = 0;
+              if (queryEmbedding && Array.isArray(queryEmbedding)) {
+                similarity = cosineSimilarity(queryEmbedding, file.embedding);
+              }
+
+              let score = similarity;
+              let matchType = 'vector';
+
+              // Hybrid boosting: Keyword match in filename or summary
+              const qLower = query.toLowerCase();
+              const filenameMatch = file.filename.toLowerCase().includes(qLower);
+              const summaryMatch = file.info?.summary?.toLowerCase().includes(qLower);
+
+              if (filenameMatch) score += 0.3;
+              if (summaryMatch) score += 0.2;
+
+              if (score > 0.1) {
+                return {
+                  filename: file.filename,
+                  info: file.info,
+                  similarity: score,
+                  matchType: (filenameMatch || summaryMatch) ? 'hybrid' : 'vector'
+                };
+              }
+
+              // Fallback: Pure keyword match
+              if (filenameMatch || summaryMatch) {
+                return {
+                  filename: file.filename,
+                  info: file.info,
+                  similarity: 0.5,
+                  matchType: 'keyword'
+                };
+              }
+
+              return null;
             })
-            .filter((item: any) => item !== null && item.similarity > 0.1) // Filter low similarity
+            .filter((item: any) => item !== null)
             .sort((a: any, b: any) => b.similarity - a.similarity)
             .slice(0, limit);
 
@@ -95,16 +135,18 @@ export async function GET(request: Request) {
     const entries = await fs.promises.readdir(uploadDir);
     const files: Array<any> = [];
 
+    console.log(`Falling back to local file search. Scanning ${entries.length} files...`);
+
     // Load files and their metadata
     for (const name of entries) {
       if (name.endsWith('.meta.json')) continue; // Skip metadata files
-      
+
       const filePath = path.join(uploadDir, name);
       try {
         // Try to load cached metadata
         const metaPath = path.join(uploadDir, `${name}.meta.json`);
         let info: any = null;
-        
+
         if (fs.existsSync(metaPath)) {
           const metaContent = await fs.promises.readFile(metaPath, 'utf8');
           const meta = JSON.parse(metaContent);
@@ -124,42 +166,76 @@ export async function GET(request: Request) {
 
     // Generate embeddings for all files and calculate similarity
     const { generateEmbeddingText } = await import('../../../lib/embeddings');
-    
+
     const scoredFiles = await Promise.all(
       files.map(async (file) => {
         try {
-          const embeddingText = generateEmbeddingText(file.info);
-          if (!embeddingText || embeddingText === 'No content available') {
-            return null;
+          // 1. Calculate Keyword Match First
+          const qLower = query.toLowerCase();
+          const filenameMatch = file.filename.toLowerCase().includes(qLower);
+          const summaryMatch = file.info?.summary?.toLowerCase().includes(qLower);
+
+          let score = 0;
+          let matchType = 'none';
+
+          if (filenameMatch) score += 0.3;
+          if (summaryMatch) score += 0.2;
+
+          if (score > 0) matchType = 'keyword';
+
+          // 2. Calculate Vector Similarity if possible
+          // Only attempt if we have a query embedding
+          if (queryEmbedding && queryEmbedding.length > 0) {
+            const embeddingText = generateEmbeddingText(file.info);
+            if (embeddingText && embeddingText !== 'No content available') {
+              const fileEmbedding = await generateEmbedding(embeddingText, provider, model);
+
+              if (fileEmbedding && fileEmbedding.length > 0) {
+                const similarity = cosineSimilarity(queryEmbedding, fileEmbedding);
+                score += similarity;
+                if (similarity > 0.1) matchType = (matchType === 'keyword') ? 'hybrid' : 'vector';
+              }
+            }
           }
 
-          const fileEmbedding = await generateEmbedding(embeddingText, provider, model);
-          if (!fileEmbedding || fileEmbedding.length === 0) {
-            return null;
-          }
+          if (score > 0.1 || matchType !== 'none') {
+            // Ensure at least some score for keyword-only matches
+            if (score === 0 && matchType === 'keyword') score = 0.5;
 
-          const similarity = cosineSimilarity(queryEmbedding, fileEmbedding);
-          
-          if (similarity > 0.1) { // Only return files with meaningful similarity
+            console.log(`Match found: ${file.filename} (score: ${score.toFixed(4)}, type: ${matchType})`);
             return {
               filename: file.filename,
               info: file.info,
-              similarity
+              similarity: score,
+              matchType
             };
           }
-          
+
           return null;
         } catch (err: any) {
           console.warn('Error generating embedding for file:', file.filename, err);
+
+          // Emergency Fallback: Keyword search if embedding failed
+          const qLower = query.toLowerCase();
+          if (file.filename.toLowerCase().includes(qLower) || file.info?.summary?.toLowerCase().includes(qLower)) {
+            return {
+              filename: file.filename,
+              info: file.info,
+              similarity: 0.4,
+              matchType: 'keyword_fallback'
+            };
+          }
           return null;
         }
       })
     );
 
     const validResults = scoredFiles
-      .filter((item): item is { filename: string; info: any; similarity: number } => item !== null)
-      .sort((a, b) => b.similarity - a.similarity)
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((a, b) => (b?.similarity || 0) - (a?.similarity || 0))
       .slice(0, limit);
+
+    console.log(`Search finished. Found ${validResults.length} matches.`);
 
     return NextResponse.json({
       query,
@@ -171,7 +247,7 @@ export async function GET(request: Request) {
     });
   } catch (err: any) {
     console.error('Search API error:', err);
-    return NextResponse.json({ 
+    return NextResponse.json({
       error: err?.message || String(err),
       results: []
     }, { status: 500 });

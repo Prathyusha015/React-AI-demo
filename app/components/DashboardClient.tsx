@@ -33,13 +33,16 @@ export default function DashboardClient() {
   const [error, setError] = useState<string | null>(null);
   const [recommended, setRecommended] = useState<Array<any>>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [signedUrls, setSignedUrls] = useState<Record<string,string>>({});
+  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [processingStatus, setProcessingStatus] = useState<Record<string, string>>({});
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Array<any>>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [recommending, setRecommending] = useState(false);
+  const [sidePanelOpen, setSidePanelOpen] = useState(false);
+  const [previewFile, setPreviewFile] = useState<any>(null);
 
   // Auto-refresh files list
   useEffect(() => {
@@ -94,6 +97,7 @@ export default function DashboardClient() {
   async function fetchRecommendations(filename: string) {
     setSelected(filename);
     setRecommended([]);
+    setRecommending(true);
     try {
       const provider = localStorage.getItem('llmProvider') || 'ondevice';
       const model = localStorage.getItem('openRouterModel') || undefined;
@@ -102,6 +106,8 @@ export default function DashboardClient() {
       if (json?.recommendations) setRecommended(json.recommendations || []);
     } catch (err) {
       console.error('Recommendations error:', err);
+    } finally {
+      setRecommending(false);
     }
   }
 
@@ -143,15 +149,15 @@ export default function DashboardClient() {
       // Get LLM provider preference from localStorage
       const provider = localStorage.getItem('llmProvider') || 'ondevice';
       const model = localStorage.getItem('openRouterModel') || null;
-      
-      const res = await fetch('/api/reprocess', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ 
+
+      const res = await fetch('/api/reprocess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           file: filename,
           provider,
           model
-        }) 
+        })
       });
       const json = await res.json();
       if (json?.info) {
@@ -180,8 +186,17 @@ export default function DashboardClient() {
     return local;
   }
 
+  const openPreview = async (file: any) => {
+    // If it's a file that needs a signed URL (like image), fetch it first
+    if (file.info?.type === 'image' || file.info?.type === 'video' || file.info?.type === 'pdf') {
+      await fetchSignedUrl(file.filename);
+    }
+    setPreviewFile(file);
+    setSidePanelOpen(true);
+  };
+
   // Prepare chart data
-  const counts = files.reduce((acc:any, f:any) => {
+  const counts = files.reduce((acc: any, f: any) => {
     const t = f.info?.type || 'unknown';
     acc[t] = (acc[t] || 0) + 1;
     return acc;
@@ -214,9 +229,9 @@ export default function DashboardClient() {
         {
           label: 'Trend Change %',
           data: trendLabels.map(k => trends[k].changePercent),
-          backgroundColor: trendLabels.map((k, i) => 
-            trends[k].trend === 'increasing' ? '#10B981' : 
-            trends[k].trend === 'decreasing' ? '#EF4444' : '#6B7280'
+          backgroundColor: trendLabels.map((k, i) =>
+            trends[k].trend === 'increasing' ? '#10B981' :
+              trends[k].trend === 'decreasing' ? '#EF4444' : '#6B7280'
           ),
           borderWidth: 1,
         },
@@ -282,7 +297,7 @@ export default function DashboardClient() {
             Search
           </button>
         </form>
-        
+
         {/* Search Results */}
         {showSearchResults && searchResults.length > 0 && (
           <div className="mt-4 space-y-2">
@@ -320,7 +335,7 @@ export default function DashboardClient() {
             </div>
           </div>
         )}
-        
+
         {showSearchResults && !isSearching && searchResults.length === 0 && searchQuery.trim().length > 0 && (
           <div className="mt-4 text-sm text-gray-500 text-center py-2">
             No results found. Try different keywords or upload more files.
@@ -398,15 +413,14 @@ export default function DashboardClient() {
                 const info = f.info || {};
                 const status = processingStatus[f.filename] || info.status || 'basic';
                 const isSelected = selected === f.filename;
-                
+
                 return (
                   <div
                     key={i}
-                    className={`rounded-lg border-2 p-4 transition-all ${
-                      isSelected 
-                        ? 'border-blue-500 bg-blue-50 shadow-md' 
-                        : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'
-                    }`}
+                    className={`rounded-lg border-2 p-4 transition-all ${isSelected
+                      ? 'border-blue-500 bg-blue-50 shadow-md'
+                      : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'
+                      }`}
                   >
                     {/* File Header */}
                     <div className="flex items-start justify-between mb-3">
@@ -417,11 +431,10 @@ export default function DashboardClient() {
                             <h4 className="font-semibold text-gray-800">{f.filename}</h4>
                             {getStatusBadge(status, info.aiPowered)}
                             {info.llmProvider && (
-                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
-                                info.llmProvider === 'openrouter' 
-                                  ? 'bg-purple-100 text-purple-700' 
-                                  : 'bg-blue-100 text-blue-700'
-                              }`}>
+                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${info.llmProvider === 'openrouter'
+                                ? 'bg-purple-100 text-purple-700'
+                                : 'bg-blue-100 text-blue-700'
+                                }`}>
                                 {info.llmProvider === 'openrouter' ? '🌐 OpenRouter' : '💻 On-Device'}
                               </span>
                             )}
@@ -448,10 +461,7 @@ export default function DashboardClient() {
                           Regenerate
                         </button>
                         <button
-                          onClick={async () => {
-                            const url = await fetchSignedUrl(f.filename);
-                            window.open(url, '_blank');
-                          }}
+                          onClick={() => openPreview(f)}
                           className="text-xs px-3 py-1.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
                         >
                           Preview
@@ -510,9 +520,9 @@ export default function DashboardClient() {
                           </div>
                         )}
                         {signedUrls[f.filename] && (
-                          <img 
-                            src={signedUrls[f.filename]} 
-                            alt={f.filename} 
+                          <img
+                            src={signedUrls[f.filename]}
+                            alt={f.filename}
                             className="mt-2 max-h-48 rounded border border-gray-200"
                             onLoad={() => fetchSignedUrl(f.filename)}
                           />
@@ -570,7 +580,7 @@ export default function DashboardClient() {
                             <div className="text-xs font-semibold text-gray-700 mb-1">📈 Trends</div>
                             {Object.entries(info.trends).map(([key, trend]: [string, any]) => (
                               <div key={key} className="text-xs text-gray-600">
-                                <span className="font-medium">{key}:</span> {trend.trend} 
+                                <span className="font-medium">{key}:</span> {trend.trend}
                                 ({trend.changePercent > 0 ? '+' : ''}{trend.changePercent}%)
                               </div>
                             ))}
@@ -580,14 +590,7 @@ export default function DashboardClient() {
                     )}
 
                     {/* Expandable Raw Data */}
-                    <details className="mt-3">
-                      <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
-                        View raw metadata
-                      </summary>
-                      <pre className="mt-2 p-2 bg-gray-50 rounded text-[10px] overflow-auto max-h-40">
-                        {JSON.stringify(info, null, 2)}
-                      </pre>
-                    </details>
+
                   </div>
                 );
               })}
@@ -600,38 +603,190 @@ export default function DashboardClient() {
               <h3 className="text-lg font-semibold text-gray-800 mb-3">
                 💡 AI Recommendations for: {files.find(f => f.filename === selected)?.filename}
               </h3>
-              {recommended.length > 0 ? (
+              {recommending ? (
+                <div className="flex items-center gap-2 text-sm text-blue-600 p-4">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                  Analyzing semantic similarities...
+                </div>
+              ) : recommended.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {recommended.map((r: any, idx: number) => (
-                    <div key={idx} className="bg-white rounded-lg p-3 border border-purple-200 hover:shadow-md transition">
+                    <div
+                      key={idx}
+                      className="group bg-white rounded-lg p-3 border border-purple-200 hover:border-purple-400 hover:shadow-md transition cursor-pointer"
+                      onClick={() => fetchRecommendations(r.filename)}
+                    >
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xl">{getFileIcon(r.info?.type)}</span>
-                        <div className="flex-1">
-                          <div className="font-medium text-sm text-gray-800">{r.filename}</div>
+                        <span className="text-xl group-hover:scale-110 transition-transform">{getFileIcon(r.info?.type)}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <div className="font-medium text-sm text-gray-900 truncate">{r.filename}</div>
+                            <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">
+                              Match
+                            </span>
+                          </div>
                           <div className="text-xs text-gray-500">Type: {r.info?.type || 'unknown'}</div>
                         </div>
                         <button
-                          onClick={() => fetchRecommendations(r.filename)}
-                          className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
+                          className="text-xs px-2 py-1 bg-purple-50 text-purple-700 rounded group-hover:bg-purple-600 group-hover:text-white transition"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openPreview(r);
+                          }}
                         >
-                          View
+                          Analyze
                         </button>
                       </div>
                       {r.info?.summary && (
-                        <p className="text-xs text-gray-600 line-clamp-2">{r.info.summary}</p>
+                        <div className="relative">
+                          <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-purple-200"></div>
+                          <p className="text-xs text-gray-600 pl-2 line-clamp-2 italic">
+                            "{r.info.summary}"
+                          </p>
+                        </div>
                       )}
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="text-sm text-gray-600">
-                  No recommendations available. The AI is analyzing relationships between files...
+                  {files.length <= 1
+                    ? "Upload at least 2 files to enable recommendations. The AI needs multiple files to discover connections."
+                    : "No recommendations available. The AI is analyzing relationships between files..."
+                  }
                 </div>
               )}
             </div>
           )}
         </>
       )}
+
+
+      {/* Side Panel for Preview */}
+      {
+        sidePanelOpen && previewFile && (
+          <div className="fixed inset-0 z-[100] flex justify-end top-0 left-0">
+            {/* Backdrop */}
+            <div
+              className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity"
+              onClick={() => setSidePanelOpen(false)}
+            ></div>
+
+            {/* Panel */}
+            <div className="relative w-full max-w-xl bg-white h-full shadow-2xl overflow-y-auto transform transition-transform border-l border-gray-200 flex flex-col">
+              <div className="sticky top-0 bg-white/90 backdrop-blur z-10 pt-0 pb-6 px-6 flex items-center justify-between border-b border-gray-200">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                    {getFileIcon(previewFile.info?.type)} {previewFile.filename}
+                  </h2>
+                  <div className="text-xs text-gray-500">
+                    {previewFile.info?.type?.toUpperCase()} • {previewFile.info?.size ? Math.round(previewFile.info.size / 1024) + ' KB' : 'Unknown Size'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSidePanelOpen(false)}
+                  className="p-2 hover:bg-gray-100 rounded-full transition"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6 flex-1">
+                {/* Actions */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      fetchRecommendations(previewFile.filename);
+                      setSidePanelOpen(false);
+                    }}
+                    className="flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium text-sm"
+                  >
+                    Set as Active File
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const url = await fetchSignedUrl(previewFile.filename);
+                      window.open(url, '_blank');
+                    }}
+                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                  >
+                    Open Original
+                  </button>
+                </div>
+
+                {/* Content Preview */}
+                {(previewFile.info?.type === 'image' || previewFile.info?.type === 'video') && signedUrls[previewFile.filename] && (
+                  <div className="rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
+                    {previewFile.info?.type === 'image' ? (
+                      <img src={signedUrls[previewFile.filename]} alt="Preview" className="w-full h-auto object-contain" />
+                    ) : (
+                      <video src={signedUrls[previewFile.filename]} controls className="w-full h-auto" />
+                    )}
+                  </div>
+                )}
+
+                {/* AI Summary */}
+                <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                  <h3 className="text-sm font-semibold text-blue-900 mb-2">🤖 AI Summary</h3>
+                  <p className="text-sm text-gray-700 leading-relaxed">
+                    {previewFile.info?.summary || "No summary available."}
+                  </p>
+                </div>
+
+                {/* Metadata Details */}
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800 mb-3">Extracted Metadata</h3>
+                  <div className="grid grid-cols-1 gap-2">
+                    {previewFile.info?.highlights && (
+                      <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
+                        <span className="text-xs font-semibold text-gray-500 uppercase block mb-1">Key Highlights</span>
+                        <ul className="text-sm text-gray-600 list-disc ml-4 space-y-1">
+                          {previewFile.info.highlights.map((h: string, i: number) => (
+                            <li key={i}>{h}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {previewFile.info?.objects && (
+                      <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
+                        <span className="text-xs font-semibold text-gray-500 uppercase block mb-1">Detected Objects</span>
+                        <div className="flex flex-wrap gap-1">
+                          {previewFile.info.objects.map((o: string, i: number) => (
+                            <span key={i} className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded border border-green-100">{o}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {previewFile.info?.tags && (
+                      <div className="bg-white p-3 rounded-lg border border-gray-200 shadow-sm">
+                        <span className="text-xs font-semibold text-gray-500 uppercase block mb-1">Tags</span>
+                        <div className="flex flex-wrap gap-1">
+                          {previewFile.info.tags.map((t: string, i: number) => (
+                            <span key={i} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded">#{t}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Raw Data Toggle */}
+                <details className="group">
+                  <summary className="cursor-pointer text-xs text-gray-500 hover:text-blue-600 transition flex items-center gap-1">
+                    <span>Show Raw JSON</span>
+                  </summary>
+                  <pre className="mt-2 p-3 bg-gray-900 text-green-400 text-xs rounded overflow-x-auto">
+                    {JSON.stringify(previewFile.info, null, 2)}
+                  </pre>
+                </details>
+
+              </div>
+            </div>
+          </div>
+        )
+      }
     </div>
   );
 }
