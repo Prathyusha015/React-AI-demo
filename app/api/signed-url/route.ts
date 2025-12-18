@@ -15,12 +15,17 @@ export async function GET(request: Request) {
     // create a signed URL for the uploads bucket
     try {
       const { data, error } = await supabase.storage.from('uploads').createSignedUrl(file, ttl);
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-      return NextResponse.json({ url: data.signedUrl, expires_at: data.signedURLExpiresAt || null });
+      if (error) {
+        console.error('Supabase signed URL error:', error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      return NextResponse.json({ url: data.signedUrl, expires_at: (data as any).signedURLExpiresAt || null });
     } catch (e: any) {
+      console.error('Exception in signed URL creation:', e);
       return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
     }
   } catch (err: any) {
+    console.error('CRITICAL ERROR in /api/signed-url:', err);
     return NextResponse.json({ error: err?.message || String(err) }, { status: 500 });
   }
 }

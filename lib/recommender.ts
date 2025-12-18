@@ -9,7 +9,7 @@ type EmbeddingProvider = 'ondevice' | 'openrouter';
  * Uses vector embeddings when available, falls back to heuristic matching
  */
 export async function recommendFiles(
-  files: Array<{ filename: string; info: any; embedding?: number[] }>, 
+  files: Array<{ filename: string; info: any; embedding?: number[] }>,
   target?: { filename?: string; info?: any; embedding?: number[] },
   useVectorSearch: boolean = true,
   provider: EmbeddingProvider = 'ondevice',
@@ -26,13 +26,13 @@ export async function recommendFiles(
     try {
       // Try vector-based recommendations if embeddings are available
       const targetEmbedding = target.embedding;
-      
+
       if (targetEmbedding && targetEmbedding.length > 0) {
         // Calculate vector similarity for all files with embeddings
         const vectorScored = otherFiles
           .map(f => {
             if (!f.embedding || f.embedding.length === 0) return null;
-            
+
             const similarity = cosineSimilarity(targetEmbedding, f.embedding);
             return {
               file: f,
@@ -40,7 +40,7 @@ export async function recommendFiles(
               vectorBased: true
             };
           })
-          .filter((item): item is { file: any; similarity: number; vectorBased: boolean } => 
+          .filter((item): item is { file: any; similarity: number; vectorBased: boolean } =>
             item !== null && item.similarity > 0.1
           )
           .sort((a, b) => b.similarity - a.similarity)
@@ -55,46 +55,32 @@ export async function recommendFiles(
         }
       }
 
-      // If target doesn't have embedding, try to generate one
+      // If target doesn't have embedding, try to generate one locally (LIMIT 1)
       if (!targetEmbedding) {
         const embeddingText = generateEmbeddingText(target.info);
         if (embeddingText && embeddingText !== 'No content available') {
+          // We only generate for the TARGET to compare against others who HAVE embeddings.
+          // We do NOT generate for all other files on the fly as it is too slow.
           const generatedEmbedding = await generateEmbedding(embeddingText, provider, model);
-          
+
           if (generatedEmbedding && generatedEmbedding.length > 0) {
-            // Calculate similarity with generated embedding
-            const vectorScored = await Promise.all(
-              otherFiles.map(async (f) => {
-                let fileEmbedding = f.embedding;
-                
-                // Generate embedding for file if not available
-                if (!fileEmbedding) {
-                  const fileEmbeddingText = generateEmbeddingText(f.info);
-                  if (fileEmbeddingText && fileEmbeddingText !== 'No content available') {
-                    fileEmbedding = await generateEmbedding(fileEmbeddingText, provider, model);
-                  }
-                }
-                
-                if (!fileEmbedding || fileEmbedding.length === 0) return null;
-                
-                const similarity = cosineSimilarity(generatedEmbedding, fileEmbedding);
+            // Calculate similarity ONLY with files that already have embeddings
+            const vectorScored = otherFiles
+              .filter(f => f.embedding && f.embedding.length > 0) // Only compare with pre-embedded files
+              .map((f) => {
+                const similarity = cosineSimilarity(generatedEmbedding, f.embedding!);
                 return {
                   file: f,
                   similarity,
                   vectorBased: true
                 };
               })
-            );
-
-            const validResults = vectorScored
-              .filter((item): item is { file: any; similarity: number; vectorBased: boolean } => 
-                item !== null && item.similarity > 0.1
-              )
+              .filter(item => item.similarity > 0.1)
               .sort((a, b) => b.similarity - a.similarity)
               .slice(0, 5);
 
-            if (validResults.length > 0) {
-              return validResults.map(item => ({
+            if (vectorScored.length > 0) {
+              return vectorScored.map(item => ({
                 filename: item.file.filename,
                 info: item.file.info
               }));
@@ -114,36 +100,36 @@ export async function recommendFiles(
       let score = 0;
       const targetInfo = target.info;
       const fileInfo = f.info;
-      
+
       try {
         // 1. Type matching (same type = higher relevance)
         if (fileInfo.type && fileInfo.type === targetInfo.type) {
           score += 3;
         }
-        
+
         // 2. Cross-modal recommendations (documents → images/videos with related content)
         if (targetInfo.type === 'pdf' || targetInfo.type === 'text') {
           // If target is a document, recommend images/videos with related objects/tags
           if (fileInfo.type === 'image' && fileInfo.objects) {
             const summaryWords = (targetInfo.summary || '').toLowerCase().split(/\s+/);
-            const matchingObjects = fileInfo.objects.filter((obj: string) => 
+            const matchingObjects = fileInfo.objects.filter((obj: string) =>
               summaryWords.some((word: string) => word.includes(obj.toLowerCase()) || obj.toLowerCase().includes(word))
             );
             score += matchingObjects.length * 2;
           }
         }
-        
+
         // 3. Tag/object similarity
         if (fileInfo.tags && targetInfo.tags) {
           const shared = fileInfo.tags.filter((t: string) => targetInfo.tags.includes(t));
           score += shared.length * 1.5;
         }
-        
+
         if (fileInfo.objects && targetInfo.objects) {
           const shared = fileInfo.objects.filter((o: string) => targetInfo.objects.includes(o));
           score += shared.length * 2;
         }
-        
+
         // 4. Summary/description similarity (simple keyword matching)
         if (fileInfo.summary && targetInfo.summary) {
           const targetWords = new Set(targetInfo.summary.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3));
@@ -151,12 +137,12 @@ export async function recommendFiles(
           const commonWords = [...targetWords].filter(w => fileWords.has(w));
           score += commonWords.length * 0.5;
         }
-        
+
         // 5. Scene/context matching
         if (fileInfo.scene && targetInfo.scene && fileInfo.scene === targetInfo.scene) {
           score += 2;
         }
-        
+
         // 6. CSV data similarity (if both are CSVs with similar columns)
         if (fileInfo.type === 'csv' && targetInfo.type === 'csv') {
           if (fileInfo.columns && targetInfo.columns) {
@@ -164,7 +150,7 @@ export async function recommendFiles(
             score += sharedCols.length;
           }
         }
-        
+
         // 7. Highlights similarity
         if (fileInfo.highlights && targetInfo.highlights) {
           const targetHighlightWords = new Set(
@@ -176,26 +162,26 @@ export async function recommendFiles(
           const commonHighlightWords = [...targetHighlightWords].filter(w => fileHighlightWords.has(w));
           score += commonHighlightWords.length * 0.3;
         }
-        
+
         // 8. AI-powered status bonus (prefer AI-analyzed files)
         if (fileInfo.status === 'analyzed' || fileInfo.aiPowered) {
           score += 0.5;
         }
-        
+
       } catch (e) {
         console.warn('Recommendation scoring error:', e);
       }
-      
+
       return { file: f, score };
     });
-    
+
     // Sort by score and return top recommendations
     const sorted = scores
       .filter(s => s.score > 0) // Only return files with some similarity
       .sort((a, b) => b.score - a.score)
       .map(s => s.file)
       .slice(0, 5);
-    
+
     // If we have good recommendations, return them; otherwise fall back to recent files
     return sorted.length > 0 ? sorted : getRecentFiles(otherFiles, 5);
   }

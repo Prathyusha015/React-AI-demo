@@ -7,113 +7,110 @@ import { supabaseServer } from '../../../lib/supabaseServer';
 import { processAndStoreEmbedding } from '../../../lib/embeddingStorage';
 
 export async function POST(request: Request) {
+  let filename = '';
   try {
-    const body = await request.json();
-    const filename = body?.file;
+    let body;
+    try {
+      body = await request.json();
+    } catch (e) {
+      return NextResponse.json({ error: 'invalid json body' }, { status: 400 });
+    }
+
+    filename = body?.file;
     const provider = body?.provider || 'ondevice';
     const model = body?.model || null;
-    if (!filename) return NextResponse.json({ error: 'missing file' }, { status: 400 });
+    if (!filename) return NextResponse.json({ error: 'missing file name' }, { status: 400 });
 
     const supabase = supabaseServer();
-    // If Supabase configured, download file from storage, process, and update DB
+    let processingPath = '';
+    let isTempFile = false;
+
+    // 1. Try to get the file from Supabase Storage if configured
     if (supabase) {
       try {
-        const { data, error: dlErr } = await supabase.storage.from('uploads').download(filename as string);
+        console.log(`Reprocess: Attempting to download ${filename} from Supabase...`);
+        const { data, error: dlErr } = await supabase.storage.from('uploads').download(filename);
+
         if (dlErr || !data) {
-          return NextResponse.json({ error: 'could not download from supabase', details: dlErr?.message }, { status: 500 });
+          console.warn('Reprocess: Supabase download failed, checking local fallback:', dlErr?.message);
+        } else {
+          // Success: Save to temp file for processing
+          const ab = await (data as any).arrayBuffer();
+          const buffer = Buffer.from(ab);
+          const tmpDir = path.join(process.cwd(), 'tmp', 'reprocess');
+          await fs.promises.mkdir(tmpDir, { recursive: true });
+          processingPath = path.join(tmpDir, filename);
+          await fs.promises.writeFile(processingPath, buffer);
+          isTempFile = true;
+          console.log(`Reprocess: Saved ${filename} to temp path for processing.`);
         }
-
-        // helper to convert various stream/blob types to Buffer
-        async function toBuffer(src: any) {
-          if (Buffer.isBuffer(src)) return src;
-          if (src.arrayBuffer) {
-            const ab = await src.arrayBuffer();
-            return Buffer.from(ab);
-          }
-          if (typeof src.getReader === 'function') {
-            // ReadableStream
-            const reader = src.getReader();
-            const chunks: Uint8Array[] = [];
-            let done = false;
-            // eslint-disable-next-line no-constant-condition
-            while (!done) {
-              // @ts-ignore
-              const res = await reader.read();
-              done = res.done;
-              if (res.value) chunks.push(res.value);
-            }
-            return Buffer.concat(chunks.map((c) => Buffer.from(c)));
-          }
-          // fallback: try arrayBuffer via any
-          const ab = await (src as any).arrayBuffer();
-          return Buffer.from(ab);
-        }
-
-        const buffer = await toBuffer(data as any);
-        const tmpDir = path.join(process.cwd(), 'tmp', 'uploads');
-        await fs.promises.mkdir(tmpDir, { recursive: true });
-        const tmpPath = path.join(tmpDir, filename as string);
-        await fs.promises.writeFile(tmpPath, buffer);
-
-        // Determine mime type from filename extension
-        const ext = path.extname(filename as string).toLowerCase();
-        let mimeType: string | undefined;
-        if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) mimeType = 'image';
-        else if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) mimeType = 'video';
-        else if (ext === '.pdf') mimeType = 'application/pdf';
-        else if (ext === '.txt') mimeType = 'text/plain';
-        else if (ext === '.csv') mimeType = 'text/csv';
-
-        const info = await processFile(tmpPath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
-
-        // update DB row if exists
-        try {
-          await supabase.from('files').update({ info, reprocessed_at: new Date().toISOString() }).eq('filename', filename);
-          
-          // Regenerate and store embedding
-          processAndStoreEmbedding(info, filename as string, provider as 'ondevice' | 'openrouter', model || undefined)
-            .then(success => {
-              if (success) {
-                console.log('Embedding regenerated for:', filename);
-              }
-            })
-            .catch(err => {
-              console.error('Error regenerating embedding:', err);
-            });
-        } catch (e) {}
-
-        try { await fs.promises.unlink(tmpPath); } catch (e) {}
-
-        return NextResponse.json({ success: true, filename, info, supabase: true });
       } catch (e: any) {
-        return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+        console.warn('Reprocess: Supabase flow failed:', e.message);
       }
     }
 
-    const uploadDir = path.join(process.cwd(), 'public', 'uploads');
-    const filePath = path.join(uploadDir, filename);
-    if (!fs.existsSync(filePath)) return NextResponse.json({ error: 'file not found' }, { status: 404 });
+    // 2. Fallback to local disk if Supabase failed or not configured
+    if (!processingPath) {
+      const uploadDir = path.join(process.cwd(), 'public', 'uploads');
+      const localPath = path.join(uploadDir, filename);
+      if (fs.existsSync(localPath)) {
+        processingPath = localPath;
+        isTempFile = false;
+        console.log(`Reprocess: Using local file at ${localPath}`);
+      }
+    }
 
-    // Determine mime type from filename extension
+    if (!processingPath) {
+      return NextResponse.json({ error: 'file not found in supabase or locally' }, { status: 404 });
+    }
+
+    // 3. Process the file
+    console.log(`Reprocess: Starting AI analysis for ${filename}...`);
     const ext = path.extname(filename).toLowerCase();
     let mimeType: string | undefined;
     if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) mimeType = 'image';
-    else if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) mimeType = 'video';
     else if (ext === '.pdf') mimeType = 'application/pdf';
-    else if (ext === '.txt') mimeType = 'text/plain';
-    else if (ext === '.csv') mimeType = 'text/csv';
 
-    const info = await processFile(filePath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
-    try {
-      const metaPath = path.join(uploadDir, `${filename}.meta.json`);
-      await fs.promises.writeFile(metaPath, JSON.stringify({ filename, info, reprocessedAt: new Date().toISOString() }, null, 2));
-      
-      // For local storage, embeddings are stored in metadata cache
-      // (Vector search will work with Supabase, but we can still generate embeddings locally)
-    } catch (e) {}
+    const info: any = await processFile(processingPath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
 
+    if (info.error) {
+      console.error(`Reprocess: Analysis error for ${filename}:`, info.error);
+      return NextResponse.json({ error: info.error }, { status: 500 });
+    }
+
+    // 4. Update Database/Metadata
+    if (supabase) {
+      console.log(`Reprocess: Updating Supabase record for ${filename}...`);
+      await supabase.from('files').update({ info, reprocessed_at: new Date().toISOString() }).eq('filename', filename);
+
+      // Background embedding generation
+      processAndStoreEmbedding(info, filename, provider as 'ondevice' | 'openrouter', model || undefined)
+        .catch(err => console.error('Reprocess: Embedding generation background error:', err));
+    }
+
+    const metaDir = path.join(process.cwd(), 'public', 'uploads');
+    if (fs.existsSync(metaDir)) {
+      const metaPath = path.join(metaDir, `${filename}.meta.json`);
+      await fs.promises.writeFile(metaPath, JSON.stringify({ filename, info, reprocessedAt: new Date().toISOString() }, null, 2))
+        .catch(() => { }); // Optional local meta
+    }
+
+    // 5. Cleanup/Sync
+    // Always ensure a copy exists in public/uploads for UI fallback
+    const finalLocalPath = path.join(process.cwd(), 'public', 'uploads', filename);
+    if (isTempFile && processingPath && !fs.existsSync(finalLocalPath)) {
+      await fs.promises.copyFile(processingPath, finalLocalPath).catch(() => { });
+    }
+
+    if (isTempFile && processingPath) {
+      await fs.promises.unlink(processingPath).catch(() => { });
+    }
+
+    console.log(`Reprocess: Successfully reprocessed ${filename}`);
     return NextResponse.json({ success: true, filename, info });
+
   } catch (err: any) {
+    console.error('CRITICAL ERROR in /api/reprocess:', err);
     return NextResponse.json({ error: err?.message || String(err) }, { status: 500 });
   }
 }

@@ -4,6 +4,7 @@ let _summarizer: any = null;
 let _modelName: string | null = null;
 let _imageClassifier: any = null;
 let _objectDetector: any = null;
+let _ocrPipeline: any = null;
 
 type LLMProvider = 'ondevice' | 'openrouter';
 
@@ -82,7 +83,7 @@ async function summarizeWithOpenRouter(text: string, model?: string): Promise<st
     }
 
     const selectedModel = model || 'openai/gpt-3.5-turbo';
-    
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -130,13 +131,79 @@ export async function extractHighlights(text: string): Promise<string[]> {
     // Split text into sentences and extract important ones
     const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 20);
     if (sentences.length === 0) return [];
-    
+
     // Take first 3-5 key sentences as highlights
     const keySentences = sentences.slice(0, Math.min(5, sentences.length));
     return keySentences.map(s => s.trim()).filter(Boolean);
   } catch (err: any) {
     console.error('Extract highlights error:', err?.message || err);
     return [];
+  }
+}
+
+/**
+ * Chat with all files as context (the Global Knowledge Brain)
+ */
+export async function chatWithContext(
+  query: string,
+  files: any[],
+  provider: LLMProvider = 'ondevice',
+  model?: string
+): Promise<string> {
+  // Construct a context string from all files
+  const contextParts = files.map((f, i) => {
+    const info = f.info || {};
+    return `[File ${i + 1}: ${f.filename}]
+Type: ${info.type}
+Summary: ${info.summary || 'No summary'}
+Highlights: ${Array.isArray(info.highlights) ? info.highlights.join(', ') : 'None'}
+Tags: ${Array.isArray(info.tags) ? info.tags.join(', ') : 'None'}`;
+  }).join('\n\n');
+
+  const systemPrompt = `You are a Multimodal Intelligence Assistant. 
+You have knowledge of the following files uploaded by the user:
+${contextParts}
+
+Use this information to answer the user's questions. If the information isn't in the files, use your general knowledge but clearly state what the files say. Be concise.`;
+
+  if (provider === 'openrouter') {
+    return await chatWithOpenRouter(query, systemPrompt, model);
+  }
+
+  // Minimal fallback for on-device chat (uses summarizer to find relevance)
+  return `On-device chat is limited. Based on my analysis: ${contextParts.substring(0, 500)}...`;
+}
+
+async function chatWithOpenRouter(query: string, systemPrompt: string, model?: string): Promise<string> {
+  try {
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openRouterKey) return "OpenRouter key missing.";
+
+    const selectedModel = model || 'openai/gpt-3.5-turbo';
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openRouterKey}`,
+        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+        'X-Title': 'AI Multimodal Dashboard',
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: query }
+        ],
+        max_tokens: 500,
+        temperature: 0.7,
+      }),
+    });
+
+    if (!response.ok) return `API Error: ${response.status}`;
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "No response.";
+  } catch (e) {
+    return "Chat failed.";
   }
 }
 
@@ -149,51 +216,105 @@ export async function analyzeImage(filePath: string): Promise<{
   try {
     const mod = await import('@xenova/transformers');
     const pipeline = mod.pipeline || mod.default?.pipeline || mod;
-    const Image = (mod as any).Image || (mod as any).default?.Image;
 
-    // Load image classification model
+    // Use image-to-text for actual captioning (summarization)
+    // Model: Xenova/vit-gpt2-image-captioning is excellent for this
     if (!_imageClassifier) {
       try {
-        _imageClassifier = await pipeline('image-classification', 'Xenova/vit-base-patch16-224');
+        console.log('Loading image captioning model...');
+        _imageClassifier = await pipeline('image-to-text', 'Xenova/vit-gpt2-image-captioning');
+        console.log('Image captioning model loaded.');
       } catch (e) {
-        console.warn('Image classifier not available, using fallback');
+        console.warn('Image captioner failed to load, falling back to classification');
+        // Fallback to classification if captioning fails
+        _imageClassifier = await pipeline('image-classification', 'Xenova/vit-base-patch16-224');
       }
     }
 
     let objects: string[] = [];
     let tags: string[] = [];
     let scene: string | null = null;
+    let caption = '';
 
-    // Load and analyze image if Image class is available
-    if (Image && _imageClassifier) {
+    // Analyze image
+    if (_imageClassifier) {
       try {
         const imageBuffer = await fs.promises.readFile(filePath);
-        const image = await Image.fromBuffer(imageBuffer);
+        // transformers.js handles buffer/path inputs flexibly in recent versions, 
+        // but passing the path directly usually works best for local files if supported, 
+        // or we convert to RawImage. For cleanliness, let's rely on the pipeline to handle it or use the standard input.
+        // The safest way with the nodejs binding is often passing the URL/path directly if supported, 
+        // but `pipeline` often expects an input it can process. 
+        // Let's use `raw` approach if needed, but `pipeline(task, model)(input)` usually accepts file paths in node.
+
+        // Use RawImage (most common) or Image as fallback
+        const RawImage = (mod as any).RawImage || (mod as any).default?.RawImage || (mod as any).Image || (mod as any).default?.Image;
+        if (!RawImage) throw new Error('Could not find RawImage class in @xenova/transformers');
+        const image = await RawImage.fromBuffer(imageBuffer);
+
         const results = await _imageClassifier(image);
-        const predictions = Array.isArray(results) ? results : [results];
-        objects = predictions.slice(0, 5).map((p: any) => p.label || String(p));
-        tags = objects;
-        scene = objects[0] || null;
-      } catch (e) {
-        console.warn('Image classification failed:', e);
+
+        // Handle different output formats based on the task (captioning vs classification)
+        if (Array.isArray(results) && results[0]?.generated_text) {
+          // Image-to-Text result: [{ generated_text: "a cat sitting on a couch" }]
+          caption = results[0].generated_text;
+          // Extract simple tags from the caption
+          tags = caption.split(' ').filter((w: string) => w.length > 4);
+          // "Fake" objects list from tags for now
+          objects = tags;
+        } else {
+          // Classification result
+          const predictions = Array.isArray(results) ? results : [results];
+          objects = predictions.slice(0, 5).map((p: any) => p.label || String(p));
+          tags = objects;
+          scene = objects[0] || null;
+          caption = `Image contains: ${objects.join(', ')}`;
+        }
+      } catch (e: any) {
+        console.error('Image AI analysis failed:', e);
+        caption = `Analysis execution failed: ${e.message}`;
       }
+    } else {
+      caption = 'Model failed to initialize. Try restarting app or check internet.';
     }
 
-    // Generate caption from detected objects
-    const caption = objects.length > 0 
-      ? `Image contains: ${objects.join(', ')}`
-      : 'Image analysis completed';
+    if (!caption) caption = 'Image analysis returned empty result.';
 
     return { caption, objects, tags, scene };
   } catch (err: any) {
     console.error('Image analysis error:', err?.message || err);
-    // Return basic analysis instead of throwing
+    // Return explicit error
     return {
-      caption: 'Image analysis completed',
+      caption: `System Error: ${err.message}`,
       objects: [],
       tags: [],
       scene: null
     };
+  }
+}
+
+/**
+ * Perform Optical Character Recognition (OCR) on an image
+ */
+export async function performOCR(filePath: string): Promise<string | null> {
+  try {
+    const mod = await import('@xenova/transformers');
+    const pipeline = mod.pipeline || mod.default?.pipeline || mod;
+    const RawImage = (mod as any).RawImage || (mod as any).default?.RawImage || (mod as any).Image || (mod as any).default?.Image;
+
+    if (!_ocrPipeline) {
+      console.log('Loading OCR model (trocr-small-printed)...');
+      _ocrPipeline = await pipeline('image-to-text', 'Xenova/trocr-small-printed');
+    }
+
+    const imageBuffer = await fs.promises.readFile(filePath);
+    const image = await RawImage.fromBuffer(imageBuffer);
+
+    const results = await _ocrPipeline(image);
+    return results[0]?.generated_text || null;
+  } catch (err: any) {
+    console.error('OCR Error:', err);
+    return null;
   }
 }
 
@@ -208,16 +329,16 @@ export async function analyzeVideo(filePath: string): Promise<{
     // For now, provide a basic structure that can be enhanced
     // In a production system, you'd use FFmpeg to extract frames
     // and then analyze frames with vision models
-    
+
     const stats = await fs.promises.stat(filePath);
     const sizeMB = stats.size / (1024 * 1024);
-    
+
     // Simulated analysis - in real implementation, extract frames and analyze
     const scenes = [
       { time: 0, description: 'Video start' },
       { time: Math.floor(sizeMB * 2), description: 'Mid-point scene' }
     ];
-    
+
     const actions = ['Video content detected'];
     const summary = `Video file analyzed (${Math.round(sizeMB)}MB). Frame extraction and analysis available with FFmpeg integration.`;
 

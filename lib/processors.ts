@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { summarize, extractHighlights, analyzeImage, analyzeVideo } from './llm';
+import { summarize, extractHighlights, analyzeImage, analyzeVideo, performOCR } from './llm';
 import { generateEmbedding, generateEmbeddingText } from './embeddings';
 
 type LLMProvider = 'ondevice' | 'openrouter';
@@ -31,10 +31,10 @@ async function processText(filePath: string, provider: LLMProvider = 'ondevice',
   const summary = llm || heuristic;
   // Extract key highlights
   const highlights = await extractHighlights(txt).catch(() => null);
-  return { 
-    type: 'text', 
-    words, 
-    summary, 
+  return {
+    type: 'text',
+    words,
+    summary,
     llm: !!llm,
     llmProvider: provider,
     highlights: highlights || [],
@@ -45,43 +45,43 @@ async function processText(filePath: string, provider: LLMProvider = 'ondevice',
 async function processCSV(filePath: string) {
   const raw = await fs.promises.readFile(filePath, 'utf8');
   const lines = raw.split(/\r?\n/).filter(Boolean);
-  const header = lines.length ? lines[0].split(',').map(h=>h.trim()) : [];
+  const header = lines.length ? lines[0].split(',').map(h => h.trim()) : [];
   const rows = lines.slice(1, 6).map(r => r.split(',').map(c => c.trim()));
 
   // Simple numeric column detection and stats (first 100 rows scanned)
   const scan = lines.slice(1, 101).map(r => r.split(',').map(c => c.trim()));
   const numericStats: Record<string, any> = {};
   const trends: Record<string, any> = {};
-  
+
   for (let col = 0; col < header.length; col++) {
     const vals = scan.map(row => parseFloat(row[col])).filter(n => !Number.isNaN(n));
     if (vals.length) {
-      const sum = vals.reduce((a,b)=>a+b,0);
-      const avg = sum/vals.length;
-      numericStats[header[col]||`col${col}`] = { 
-        count: vals.length, 
-        min: Math.min(...vals), 
-        max: Math.max(...vals), 
-        avg: avg 
+      const sum = vals.reduce((a, b) => a + b, 0);
+      const avg = sum / vals.length;
+      numericStats[header[col] || `col${col}`] = {
+        count: vals.length,
+        min: Math.min(...vals),
+        max: Math.max(...vals),
+        avg: avg
       };
-      
+
       // Trend analysis: check if values are increasing/decreasing
       if (vals.length > 5) {
         const firstHalf = vals.slice(0, Math.floor(vals.length / 2));
         const secondHalf = vals.slice(Math.floor(vals.length / 2));
-        const firstAvg = firstHalf.reduce((a,b)=>a+b,0) / firstHalf.length;
-        const secondAvg = secondHalf.reduce((a,b)=>a+b,0) / secondHalf.length;
+        const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
+        const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
         const trend = secondAvg > firstAvg ? 'increasing' : secondAvg < firstAvg ? 'decreasing' : 'stable';
         const changePercent = ((secondAvg - firstAvg) / Math.abs(firstAvg || 1)) * 100;
-        trends[header[col]||`col${col}`] = { trend, changePercent: Math.round(changePercent * 100) / 100 };
+        trends[header[col] || `col${col}`] = { trend, changePercent: Math.round(changePercent * 100) / 100 };
       }
     }
   }
 
-  return { 
-    type: 'csv', 
-    columns: header, 
-    sample: rows, 
+  return {
+    type: 'csv',
+    columns: header,
+    sample: rows,
     numericStats,
     trends: Object.keys(trends).length > 0 ? trends : null,
     rowCount: lines.length - 1,
@@ -104,12 +104,12 @@ async function processPDF(filePath: string, provider: LLMProvider = 'ondevice', 
     const summary = llmSummary || heuristic;
     // Extract key highlights
     const highlights = await extractHighlights(text).catch(() => null);
-    return { 
-      type: 'pdf', 
-      size: buffer.length, 
-      pages: data?.numpages ?? null, 
-      words, 
-      summary, 
+    return {
+      type: 'pdf',
+      size: buffer.length,
+      pages: data?.numpages ?? null,
+      words,
+      summary,
       llm: !!llmSummary,
       llmProvider: provider,
       highlights: highlights || [],
@@ -125,26 +125,38 @@ async function processPDF(filePath: string, provider: LLMProvider = 'ondevice', 
 async function processImage(filePath: string) {
   const stats = await fs.promises.stat(filePath);
   const filename = path.basename(filePath);
-  
+
   // Attempt AI-powered image analysis
   try {
     const analysis = await analyzeImage(filePath);
+
+    // Attempt OCR (multimodal enhancement)
+    const ocrText = await performOCR(filePath).catch(() => null);
+
+    let caption = analysis.caption || `Image: ${filename}`;
+    if (ocrText) {
+      caption += ` | OCR Text: ${ocrText}`;
+    }
+
     return {
       type: 'image',
       size: stats.size,
-      caption: analysis.caption || `Image: ${filename}`,
+      caption: caption,
+      // IMPORTANT: Map the caption to 'summary' so the Dashboard UI displays it!
+      summary: caption,
       objects: analysis.objects || [],
-      tags: analysis.tags || [],
+      tags: [...(analysis.tags || []), ...(ocrText ? ocrText.split(' ').filter((w: string) => w.length > 5) : [])],
       scene: analysis.scene || null,
+      ocrText: ocrText,
       status: 'analyzed',
       aiPowered: true
     };
   } catch (err: any) {
     // Fallback: basic filename-based analysis
-    const tokens = filename.replace(/[_\-\.]/g, ' ').split(/\s+/).filter(Boolean).slice(0,5);
-    return { 
-      type: 'image', 
-      size: stats.size, 
+    const tokens = filename.replace(/[_\-\.]/g, ' ').split(/\s+/).filter(Boolean).slice(0, 5);
+    return {
+      type: 'image',
+      size: stats.size,
       caption: `Image: ${filename}`,
       tags: tokens,
       status: 'basic',
@@ -157,7 +169,7 @@ async function processImage(filePath: string) {
 async function processVideo(filePath: string) {
   const stats = await fs.promises.stat(filePath);
   const filename = path.basename(filePath);
-  
+
   // Attempt AI-powered video analysis
   try {
     const analysis = await analyzeVideo(filePath);
@@ -173,8 +185,8 @@ async function processVideo(filePath: string) {
     };
   } catch (err: any) {
     // Fallback: basic metadata
-    return { 
-      type: 'video', 
+    return {
+      type: 'video',
       size: stats.size,
       status: 'basic',
       aiPowered: false,

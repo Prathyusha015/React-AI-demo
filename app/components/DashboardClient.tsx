@@ -43,6 +43,10 @@ export default function DashboardClient() {
   const [recommending, setRecommending] = useState(false);
   const [sidePanelOpen, setSidePanelOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<any>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatQuery, setChatQuery] = useState('');
+  const [chatHistory, setChatHistory] = useState<Array<{ role: string, text: string }>>([]);
+  const [isChatting, setIsChatting] = useState(false);
 
   // Auto-refresh files list
   useEffect(() => {
@@ -74,6 +78,10 @@ export default function DashboardClient() {
         const statuses: Record<string, string> = {};
         json.files.forEach((f: any) => {
           statuses[f.filename] = f.info?.status || 'unknown';
+          // Auto-fetch signed URLs for images/videos/pdfs so they show in grid
+          if (f.info?.type === 'image' || f.info?.type === 'video' || f.info?.type === 'pdf') {
+            fetchSignedUrl(f.filename);
+          }
         });
         setProcessingStatus(statuses);
       } else {
@@ -103,7 +111,18 @@ export default function DashboardClient() {
       const model = localStorage.getItem('openRouterModel') || undefined;
       const res = await fetch(`/api/recommend?file=${encodeURIComponent(filename)}&vector=true&provider=${provider}${model ? `&model=${encodeURIComponent(model)}` : ''}`);
       const json = await res.json();
-      if (json?.recommendations) setRecommended(json.recommendations || []);
+
+      if (json?.recommendations && json.recommendations.length > 0) {
+        setRecommended(json.recommendations);
+      } else if (files.length > 1) {
+        // Fallback: If vector search returned nothing (e.g. dimension mismatch), try heuristic search
+        console.log('Vector recommendations empty, trying heuristic fallback...');
+        const resFallback = await fetch(`/api/recommend?file=${encodeURIComponent(filename)}&vector=false`);
+        const jsonFallback = await resFallback.json();
+        setRecommended(jsonFallback?.recommendations || []);
+      } else {
+        setRecommended([]);
+      }
     } catch (err) {
       console.error('Recommendations error:', err);
     } finally {
@@ -143,6 +162,37 @@ export default function DashboardClient() {
     performSearch(searchQuery);
   };
 
+  async function handleChat(e: React.FormEvent) {
+    e.preventDefault();
+    if (!chatQuery.trim() || isChatting) return;
+
+    const userMsg = chatQuery;
+    setChatQuery('');
+    setChatHistory(prev => [...prev, { role: 'user', text: userMsg }]);
+    setIsChatting(true);
+
+    try {
+      const provider = localStorage.getItem('llmProvider') || 'ondevice';
+      const model = localStorage.getItem('openRouterModel') || undefined;
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: userMsg, provider, model })
+      });
+      const json = await res.json();
+
+      setChatHistory(prev => [...prev, {
+        role: 'assistant',
+        text: json.answer || "Sorry, I couldn't process that."
+      }]);
+    } catch (err) {
+      setChatHistory(prev => [...prev, { role: 'assistant', text: "Error connecting to AI." }]);
+    } finally {
+      setIsChatting(false);
+    }
+  }
+
   async function reprocessFile(filename: string) {
     setProcessingStatus(prev => ({ ...prev, [filename]: 'processing' }));
     try {
@@ -163,8 +213,12 @@ export default function DashboardClient() {
       if (json?.info) {
         await loadFiles();
         if (selected) fetchRecommendations(selected);
+      } else if (json?.error) {
+        throw new Error(json.error);
       }
-    } catch (e) {
+    } catch (e: any) {
+      console.error('Reprocess error:', e);
+      alert(`Reprocess failed: ${e.message}`);
       setProcessingStatus(prev => ({ ...prev, [filename]: 'error' }));
     }
   }
@@ -184,6 +238,73 @@ export default function DashboardClient() {
     const local = `/uploads/${filename}`;
     setSignedUrls((s) => ({ ...s, [filename]: local }));
     return local;
+  }
+
+
+
+  async function reindexFiles() {
+    if (!confirm('This will regenerate AI search indexes for all files using your current provider. This helps fix search issues if you switched providers. Continue?')) return;
+
+    setLoading(true);
+    try {
+      const provider = localStorage.getItem('llmProvider') || 'ondevice';
+      const model = localStorage.getItem('openRouterModel') || undefined;
+
+      const res = await fetch('/api/reindex', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, model })
+      });
+      const json = await res.json();
+
+      if (json.success) {
+        alert(`Reindexing complete! Updated ${json.results.filter((r: any) => r.status.startsWith('updated')).length} files.`);
+        await loadFiles();
+      } else {
+        throw new Error(json.error || 'Reindexing failed');
+      }
+    } catch (err: any) {
+      alert('Error reindexing: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteFile(filename: string) {
+    if (!confirm(`Are you sure you want to delete "${filename}"?`)) return;
+
+    // Set status to indicate deletion (optional, or just handle via optimistic/loading)
+    // We'll rely on the API call and then update state.
+
+    try {
+      const res = await fetch('/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename })
+      });
+      const json = await res.json();
+
+      if (!res.ok) throw new Error(json.error || 'Failed to delete');
+
+      // Update local state
+      setFiles(prev => prev.filter(f => f.filename !== filename));
+      setSearchResults(prev => prev.filter(f => f.filename !== filename));
+      setRecommended(prev => prev.filter(f => f.filename !== filename));
+
+      if (selected === filename) {
+        setSelected(null);
+        setRecommended([]);
+      }
+
+      if (previewFile?.filename === filename) {
+        setSidePanelOpen(false);
+        setPreviewFile(null);
+      }
+
+    } catch (err: any) {
+      console.error('Delete error:', err);
+      alert('Error deleting file: ' + err.message);
+    }
   }
 
   const openPreview = async (file: any) => {
@@ -358,8 +479,18 @@ export default function DashboardClient() {
             </div>
           )}
           {!loading && !error && files.length > 0 && (
-            <div className="text-sm text-gray-600">
-              ✓ {files.length} file{files.length !== 1 ? 's' : ''} loaded
+            <div className="flex items-center gap-3">
+              <div className="text-sm text-gray-600">
+                ✓ {files.length} file{files.length !== 1 ? 's' : ''} loaded
+              </div>
+              <div className="h-4 w-px bg-gray-300"></div>
+              <button
+                onClick={reindexFiles}
+                className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                title="Fix search issues by regenerating embeddings"
+              >
+                ⟳ Reindex Search
+              </button>
             </div>
           )}
         </div>
@@ -466,6 +597,12 @@ export default function DashboardClient() {
                         >
                           Preview
                         </button>
+                        <button
+                          onClick={() => deleteFile(f.filename)}
+                          className="text-xs px-3 py-1.5 rounded bg-red-100 text-red-700 hover:bg-red-200 transition"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </div>
 
@@ -519,14 +656,17 @@ export default function DashboardClient() {
                             <span className="font-medium">Scene:</span> {info.scene}
                           </div>
                         )}
-                        {signedUrls[f.filename] && (
+                        <div className="mt-2 max-h-48 overflow-hidden rounded border border-gray-200 bg-gray-50 flex items-center justify-center min-h-[100px]">
                           <img
-                            src={signedUrls[f.filename]}
+                            src={signedUrls[f.filename] || `/uploads/${f.filename}`}
                             alt={f.filename}
-                            className="mt-2 max-h-48 rounded border border-gray-200"
-                            onLoad={() => fetchSignedUrl(f.filename)}
+                            className="max-h-48 w-auto object-contain"
+                            onError={(e) => {
+                              // If local fallback also fails, show an icon or hide
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
                           />
-                        )}
+                        </div>
                       </div>
                     )}
 
@@ -600,9 +740,18 @@ export default function DashboardClient() {
           {/* Recommendations Section */}
           {selected && (
             <div className="mt-6 p-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg border border-purple-200">
-              <h3 className="text-lg font-semibold text-gray-800 mb-3">
-                💡 AI Recommendations for: {files.find(f => f.filename === selected)?.filename}
-              </h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-semibold text-gray-800">
+                  💡 AI Recommendations for: {files.find(f => f.filename === selected)?.filename}
+                </h3>
+                <button
+                  onClick={() => { setSelected(null); setRecommended([]); }}
+                  className="text-gray-400 hover:text-gray-600 p-1"
+                  title="Close Recommendations"
+                >
+                  ✕
+                </button>
+              </div>
               {recommending ? (
                 <div className="flex items-center gap-2 text-sm text-blue-600 p-4">
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
@@ -625,7 +774,11 @@ export default function DashboardClient() {
                               Match
                             </span>
                           </div>
-                          <div className="text-xs text-gray-500">Type: {r.info?.type || 'unknown'}</div>
+                          <div className="text-xs text-gray-500">
+                            Type: {r.info?.type || 'unknown'}
+                            {/* Debug info: Show if this was a fallback heuristic match */}
+                            {!r.info?.similarity && <span className="text-gray-400 ml-2">(Similar)</span>}
+                          </div>
                         </div>
                         <button
                           className="text-xs px-2 py-1 bg-purple-50 text-purple-700 rounded group-hover:bg-purple-600 group-hover:text-white transition"
@@ -635,6 +788,16 @@ export default function DashboardClient() {
                           }}
                         >
                           Analyze
+                        </button>
+                        <button
+                          className="text-xs px-2 py-1 bg-red-50 text-red-700 rounded hover:bg-red-200 transition"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteFile(r.filename);
+                          }}
+                          title="Delete File"
+                        >
+                          ✕
                         </button>
                       </div>
                       {r.info?.summary && (
@@ -649,11 +812,24 @@ export default function DashboardClient() {
                   ))}
                 </div>
               ) : (
-                <div className="text-sm text-gray-600">
-                  {files.length <= 1
-                    ? "Upload at least 2 files to enable recommendations. The AI needs multiple files to discover connections."
-                    : "No recommendations available. The AI is analyzing relationships between files..."
-                  }
+                <div className="text-sm text-gray-600 text-center py-4">
+                  {files.length <= 1 ? (
+                    "Upload at least 2 files to enable recommendations. The AI needs multiple files to discover connections."
+                  ) : (
+                    <div className="flex flex-col items-center gap-2">
+                      <p>No strong AI matches found yet.</p>
+                      <button
+                        onClick={() => {
+                          // Force fallback query manually
+                          const current = files.find(f => f.filename === selected);
+                          if (current) fetchRecommendations(current.filename);
+                        }}
+                        className="text-xs px-3 py-1 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-medium"
+                      >
+                        Show Recent Files / Heuristic Matches
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -711,6 +887,26 @@ export default function DashboardClient() {
                     className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
                   >
                     Open Original
+                  </button>
+                  <button
+                    onClick={() => deleteFile(previewFile.filename)}
+                    className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 text-sm font-medium"
+                  >
+                    Delete
+                  </button>
+                  <button
+                    onClick={() => {
+                      reprocessFile(previewFile.filename).then(() => {
+                        // Try to update the local preview file object with the new data from the list
+                        // Since loadFiles() updates the 'files' list, we need to find the new file object
+                        // But state updates are async, so simpler is to close the panel or just rely on the user re-opening it.
+                        // BETTER: Update reprocessFile to return the new file info and update previewFile.
+                        alert('Regeneration started. Please close and re-open the preview to see changes when finished.');
+                      });
+                    }}
+                    className="px-4 py-2 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 text-sm font-medium"
+                  >
+                    Regenerate AI
                   </button>
                 </div>
 
@@ -787,6 +983,94 @@ export default function DashboardClient() {
           </div>
         )
       }
+
+      {/* Global Knowledge Chat Button */}
+      <button
+        onClick={() => setChatOpen(!chatOpen)}
+        className="fixed bottom-8 right-8 w-16 h-16 bg-blue-600 text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 transition-transform z-[150] group"
+      >
+        {chatOpen ? <span className="text-2xl">✕</span> : (
+          <div className="relative">
+            <span className="text-3xl">🧠</span>
+            <span className="absolute -top-1 -right-1 flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+            </span>
+          </div>
+        )}
+        <span className="absolute right-20 bg-gray-800 text-white px-3 py-1 rounded text-sm whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
+          Ask Knowledge Brain
+        </span>
+      </button>
+
+      {/* Chat Window */}
+      {chatOpen && (
+        <div className="fixed bottom-28 right-8 w-96 max-w-[calc(100vw-2rem)] h-[500px] bg-white rounded-2xl shadow-2xl border border-gray-200 z-[150] flex flex-col overflow-hidden animate-slide-up">
+          <div className="p-4 bg-gradient-to-r from-blue-600 to-indigo-700 text-white flex justify-between items-center">
+            <div>
+              <h3 className="font-bold">Multimodal Knowledge Brain</h3>
+              <p className="text-[10px] text-blue-100 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+                Connected to {files.length} files
+              </p>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+            {chatHistory.length === 0 && (
+              <div className="text-center py-8">
+                <div className="text-4xl mb-2">🧠</div>
+                <p className="text-gray-500 text-sm">Ask me anything about your uploaded files!</p>
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  <button onClick={() => setChatQuery("Summarize all my documents")} className="text-[10px] px-2 py-1 bg-white border border-gray-200 rounded-full hover:bg-gray-50 text-gray-600 transition">Summarize all</button>
+                  <button onClick={() => setChatQuery("What images did I upload?")} className="text-[10px] px-2 py-1 bg-white border border-gray-200 rounded-full hover:bg-gray-50 text-gray-600 transition">List images</button>
+                  <button onClick={() => setChatQuery("Any trends in my data?")} className="text-[10px] px-2 py-1 bg-white border border-gray-200 rounded-full hover:bg-gray-50 text-gray-600 transition">Find trends</button>
+                </div>
+              </div>
+            )}
+            {chatHistory.map((msg, idx) => (
+              <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.role === 'user'
+                  ? 'bg-blue-600 text-white rounded-tr-none'
+                  : 'bg-white text-gray-800 border border-gray-200 shadow-sm rounded-tl-none'
+                  }`}>
+                  {msg.text}
+                </div>
+              </div>
+            ))}
+            {isChatting && (
+              <div className="flex justify-start">
+                <div className="bg-white border border-gray-200 p-3 rounded-2xl animate-pulse flex gap-1">
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full"></div>
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full"></div>
+                  <div className="w-1.5 h-1.5 bg-gray-400 rounded-full"></div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <form onSubmit={handleChat} className="p-4 border-t border-gray-200 bg-white">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={chatQuery}
+                onChange={(e) => setChatQuery(e.target.value)}
+                placeholder="Ask your data..."
+                className="flex-1 px-4 py-2 bg-gray-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={isChatting}
+                className="p-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 transition"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
