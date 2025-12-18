@@ -1,4 +1,10 @@
 import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 let _summarizer: any = null;
 let _modelName: string | null = null;
@@ -325,31 +331,95 @@ export async function analyzeVideo(filePath: string): Promise<{
   summary: string | null;
 }> {
   try {
-    // For video analysis, we'd ideally extract frames and analyze them
-    // For now, provide a basic structure that can be enhanced
-    // In a production system, you'd use FFmpeg to extract frames
-    // and then analyze frames with vision models
-
     const stats = await fs.promises.stat(filePath);
-    const sizeMB = stats.size / (1024 * 1024);
+    const filename = path.basename(filePath);
+    const tempDir = path.join(path.dirname(filePath), 'temp_frames', filename);
 
-    // Simulated analysis - in real implementation, extract frames and analyze
-    const scenes = [
-      { time: 0, description: 'Video start' },
-      { time: Math.floor(sizeMB * 2), description: 'Mid-point scene' }
-    ];
+    if (!fs.existsSync(tempDir)) {
+      await fs.promises.mkdir(tempDir, { recursive: true });
+    }
 
-    const actions = ['Video content detected'];
-    const summary = `Video file analyzed (${Math.round(sizeMB)}MB). Frame extraction and analysis available with FFmpeg integration.`;
+    // Get video metadata/duration
+    const metadata: any = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err, data) => {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+
+    const duration = metadata.format.duration || 0;
+
+    // Extract 3 frames: start, middle, end
+    const frameTimes = [
+      Math.min(1, duration * 0.1),
+      duration * 0.5,
+      duration * 0.9
+    ].map(t => Math.floor(t));
+
+    const scenes: Array<{ time: number; description: string }> = [];
+    const actions: string[] = [];
+
+    // Extract frames using ffmpeg
+    await new Promise((resolve, reject) => {
+      ffmpeg(filePath)
+        .on('end', () => resolve(true))
+        .on('error', (err) => reject(err))
+        .screenshots({
+          count: 3,
+          folder: tempDir,
+          filename: 'frame-%i.png',
+          timestamps: frameTimes
+        });
+    });
+
+    // Analyze each extracted frame
+    const frameFiles = await fs.promises.readdir(tempDir);
+    for (let i = 0; i < frameFiles.length; i++) {
+      const framePath = path.join(tempDir, frameFiles[i]);
+      try {
+        const analysis = await analyzeImage(framePath);
+        scenes.push({
+          time: frameTimes[i] || i,
+          description: analysis.caption
+        });
+        if (analysis.objects.length > 0) {
+          actions.push(...analysis.objects.slice(0, 2));
+        }
+      } catch (e) {
+        console.warn(`Failed to analyze frame ${i}:`, e);
+      }
+    }
+
+    // Cleanup temp frames
+    try {
+      for (const f of frameFiles) {
+        await fs.promises.unlink(path.join(tempDir, f));
+      }
+      await fs.promises.rmdir(tempDir);
+    } catch (e) {
+      console.warn('Failed to cleanup temp frames:', e);
+    }
+
+    const uniqueActions = Array.from(new Set(actions)).filter(a => a.length > 3);
+    const summary = scenes.length > 0
+      ? `Video summary: ${scenes.map(s => s.description).join(' Then, ')}.`
+      : `Video file analyzed. Detected duration: ${Math.round(duration)}s.`;
 
     return {
-      duration: null, // Would need FFmpeg to get actual duration
+      duration,
       scenes,
-      actions,
+      actions: uniqueActions,
       summary
     };
   } catch (err: any) {
     console.error('Video analysis error:', err?.message || err);
-    throw err;
+    // Fallback if FFmpeg fails
+    const stats = await fs.promises.stat(filePath);
+    return {
+      duration: null,
+      scenes: [],
+      actions: [],
+      summary: `Basic analysis: Video file size is ${(stats.size / 1024 / 1024).toFixed(2)}MB. Detailed AI analysis failed.`
+    };
   }
 }
