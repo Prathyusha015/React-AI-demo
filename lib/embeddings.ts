@@ -226,3 +226,4 @@ export function cosineSimilarity(vec1: number[], vec2: number[]): number {
 
   return dotProduct / denominator;
 }
+
