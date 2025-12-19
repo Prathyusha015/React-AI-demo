@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Pie, Bar, Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -52,10 +52,13 @@ export default function DashboardClient() {
   useEffect(() => {
     loadFiles();
     if (autoRefresh) {
-      const interval = setInterval(loadFiles, 3000); // Refresh every 3 seconds
+      const interval = setInterval(() => {
+        loadFiles();
+      }, 10000); // Refresh every 10 seconds (increased to reduce API calls)
       return () => clearInterval(interval);
     }
-  }, [autoRefresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRefresh]); // Only depend on autoRefresh, loadFiles is stable
 
   // Listen for file update events
   useEffect(() => {
@@ -66,7 +69,17 @@ export default function DashboardClient() {
     return () => window.removeEventListener('filesUpdated', handleFilesUpdated);
   }, []);
 
+  // Use ref to prevent concurrent loadFiles calls
+  const isLoadingFilesRef = useRef(false);
+  
   async function loadFiles() {
+    // Prevent multiple simultaneous calls
+    if (isLoadingFilesRef.current) {
+      console.log('loadFiles already in progress, skipping...');
+      return;
+    }
+    
+    isLoadingFilesRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -91,18 +104,48 @@ export default function DashboardClient() {
       setError(err?.message || String(err));
     } finally {
       setLoading(false);
+      isLoadingFilesRef.current = false;
     }
   }
 
+  // Use ref to track if we've already auto-selected
+  const hasAutoSelectedRef = useRef(false);
+  const lastFilesLengthRef = useRef(0);
+  
   useEffect(() => {
-    // auto-select first file and fetch recommendations
-    if (files.length && !selected) {
+    // Only auto-select if files list changed from empty to non-empty
+    const filesChanged = files.length !== lastFilesLengthRef.current;
+    lastFilesLengthRef.current = files.length;
+    
+    // auto-select first file and fetch recommendations (only once when files first load)
+    if (files.length > 0 && !selected && !hasAutoSelectedRef.current && filesChanged) {
       const first = files[0]?.filename;
-      if (first) fetchRecommendations(first);
+      if (first) {
+        hasAutoSelectedRef.current = true;
+        // Small delay to avoid race conditions
+        setTimeout(() => {
+          fetchRecommendations(first);
+        }, 100);
+      }
     }
-  }, [files]);
+    // Reset when files list becomes empty
+    if (files.length === 0) {
+      hasAutoSelectedRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files.length, selected]); // Only depend on length and selected, not the entire files array
 
+  // Use ref to prevent multiple simultaneous recommendation fetches
+  const recommendationFetchRef = useRef<string | null>(null);
+  
   async function fetchRecommendations(filename: string) {
+    // Prevent duplicate calls for the same file
+    if (recommendationFetchRef.current === filename && recommending) {
+      console.log('Recommendations already being fetched for:', filename);
+      return;
+    }
+    
+    recommendationFetchRef.current = filename;
     setSelected(filename);
     setRecommended([]);
     setRecommending(true);
@@ -114,21 +157,22 @@ export default function DashboardClient() {
 
       if (json?.recommendations && json.recommendations.length > 0) {
         setRecommended(json.recommendations);
-      } else if (files.length > 1) {
-        // Fallback: If vector search returned nothing (e.g. dimension mismatch), try heuristic search
-        console.log('Vector recommendations empty, trying heuristic fallback...');
-        const resFallback = await fetch(`/api/recommend?file=${encodeURIComponent(filename)}&vector=false`);
-        const jsonFallback = await resFallback.json();
-        setRecommended(jsonFallback?.recommendations || []);
       } else {
+        // Don't show recommendations if there are no good matches
+        // This prevents showing unrelated files just because they exist
+        console.log('No recommendations found - files are not similar enough');
         setRecommended([]);
       }
     } catch (err) {
       console.error('Recommendations error:', err);
     } finally {
       setRecommending(false);
+      recommendationFetchRef.current = null;
     }
   }
+
+  // Use ref to prevent multiple simultaneous searches
+  const searchInProgressRef = useRef(false);
 
   async function performSearch(query: string) {
     if (!query || query.trim().length === 0) {
@@ -137,6 +181,13 @@ export default function DashboardClient() {
       return;
     }
 
+    // Prevent multiple simultaneous searches
+    if (searchInProgressRef.current) {
+      console.log('Search already in progress, skipping duplicate call');
+      return;
+    }
+
+    searchInProgressRef.current = true;
     setIsSearching(true);
     setShowSearchResults(true);
     try {
@@ -154,12 +205,16 @@ export default function DashboardClient() {
       setSearchResults([]);
     } finally {
       setIsSearching(false);
+      searchInProgressRef.current = false;
     }
   }
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    performSearch(searchQuery);
+    e.stopPropagation(); // Prevent event bubbling
+    if (!isSearching && searchQuery.trim()) {
+      performSearch(searchQuery);
+    }
   };
 
   async function handleChat(e: React.FormEvent) {
@@ -223,8 +278,22 @@ export default function DashboardClient() {
     }
   }
 
+  // Track ongoing signed URL fetches to prevent duplicates
+  const fetchingUrlsRef = useRef<Set<string>>(new Set());
+  
   async function fetchSignedUrl(filename: string) {
-    if (signedUrls[filename]) return signedUrls[filename];
+    // Return cached URL if available
+    if (signedUrls[filename]) {
+      return signedUrls[filename];
+    }
+    
+    // Prevent duplicate fetches for the same file
+    if (fetchingUrlsRef.current.has(filename)) {
+      console.log('Signed URL already being fetched for:', filename);
+      return signedUrls[filename] || `/uploads/${filename}`;
+    }
+    
+    fetchingUrlsRef.current.add(filename);
     try {
       const res = await fetch(`/api/signed-url?file=${encodeURIComponent(filename)}`);
       const j = await res.json();
@@ -233,7 +302,10 @@ export default function DashboardClient() {
         return j.url;
       }
     } catch (e) {
+      console.warn('Failed to fetch signed URL for', filename, e);
       // ignore and fallback to local path
+    } finally {
+      fetchingUrlsRef.current.delete(filename);
     }
     const local = `/uploads/${filename}`;
     setSignedUrls((s) => ({ ...s, [filename]: local }));
@@ -607,7 +679,7 @@ export default function DashboardClient() {
                     </div>
 
                     {/* AI Summary */}
-                    {info.summary && (
+                    {(info.summary || info.type === 'video' || info.type === 'docx') && (
                       <div className="mb-3 p-3 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-100">
                         <div className="flex items-center gap-2 mb-2">
                           <span className="text-sm font-semibold text-gray-700">🤖 AI Summary</span>
@@ -617,7 +689,9 @@ export default function DashboardClient() {
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-gray-700 leading-relaxed">{info.summary}</p>
+                        <p className="text-sm text-gray-700 leading-relaxed">
+                          {info.summary || (info.type === 'video' ? 'Video analysis in progress or unavailable. Click "Regenerate" to analyze this video.' : info.type === 'docx' ? 'Document processing in progress or unavailable. Click "Regenerate" to analyze this document.' : 'No summary available.')}
+                        </p>
                       </div>
                     )}
 

@@ -11,7 +11,8 @@ export async function processFile(filePath: string, mimeType?: string, provider:
     if (ext === '.txt') return await processText(filePath, provider, model);
     if (ext === '.csv') return await processCSV(filePath);
     if (ext === '.pdf') return await processPDF(filePath, provider, model);
-    if (mimeType?.startsWith('image') || ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) return await processImage(filePath);
+    if (ext === '.docx' || ext === '.doc') return await processDOCX(filePath, provider, model);
+    if (mimeType?.startsWith('image') || ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) return await processImage(filePath, provider, model);
     if (mimeType?.startsWith('video') || ['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) return await processVideo(filePath);
 
     const stats = await fs.promises.stat(filePath);
@@ -27,7 +28,16 @@ async function processText(filePath: string, provider: LLMProvider = 'ondevice',
   // heuristic fallback summary
   const heuristic = txt.slice(0, 600);
   // attempt LLM summarize; if it fails, return heuristic
-  const llm = await summarize(txt, provider, model).catch(() => null);
+  console.log(`📝 Processing text file: provider=${provider}, model=${model || 'default'}, text length=${txt.length}`);
+  const llm = await summarize(txt, provider, model).catch((err) => {
+    console.error('❌ Summarization error in processText:', err?.message || err);
+    return null;
+  });
+  if (llm) {
+    console.log(`✅ Text summary generated (${llm.length} chars, provider: ${provider})`);
+  } else {
+    console.warn(`⚠️ Text summary not generated, using heuristic fallback (provider: ${provider})`);
+  }
   const summary = llm || heuristic;
   // Extract key highlights
   const highlights = await extractHighlights(txt).catch(() => null);
@@ -100,7 +110,16 @@ async function processPDF(filePath: string, provider: LLMProvider = 'ondevice', 
     const text: string = data?.text || '';
     const words = text.split(/\s+/).filter(Boolean).length;
     const heuristic = text.slice(0, 1000);
-    const llmSummary = await summarize(text, provider, model).catch(() => null);
+    console.log(`📝 Processing PDF: provider=${provider}, model=${model || 'default'}, text length=${text.length}`);
+    const llmSummary = await summarize(text, provider, model).catch((err) => {
+      console.error('❌ Summarization error in processPDF:', err?.message || err);
+      return null;
+    });
+    if (llmSummary) {
+      console.log(`✅ PDF summary generated (${llmSummary.length} chars, provider: ${provider})`);
+    } else {
+      console.warn(`⚠️ PDF summary not generated, using heuristic fallback (provider: ${provider})`);
+    }
     const summary = llmSummary || heuristic;
     // Extract key highlights
     const highlights = await extractHighlights(text).catch(() => null);
@@ -122,13 +141,65 @@ async function processPDF(filePath: string, provider: LLMProvider = 'ondevice', 
   }
 }
 
-async function processImage(filePath: string) {
+async function processDOCX(filePath: string, provider: LLMProvider = 'ondevice', model?: string) {
+  // Attempt to extract text from .docx files using office-text-extractor
+  try {
+    const stats = await fs.promises.stat(filePath);
+    // dynamic import so the dependency is optional at runtime
+    // office-text-extractor's default export is extractText function that takes a file path
+    const officeModule = await import('office-text-extractor');
+    const extractText = officeModule.default;
+    
+    if (typeof extractText !== 'function') {
+      throw new Error('extractText is not available in office-text-extractor');
+    }
+    
+    // Extract text from file path (the library handles file reading internally)
+    const text = await extractText(filePath);
+    
+    if (!text || text.trim().length === 0) {
+      throw new Error('No text extracted from DOCX file');
+    }
+    
+    const words = text.split(/\s+/).filter(Boolean).length;
+    const heuristic = text.slice(0, 1000);
+    const llmSummary = await summarize(text, provider, model).catch(() => null);
+    const summary = llmSummary || heuristic;
+    // Extract key highlights
+    const highlights = await extractHighlights(text).catch(() => null);
+    return {
+      type: 'docx',
+      size: stats.size,
+      words,
+      summary,
+      llm: !!llmSummary,
+      llmProvider: provider,
+      highlights: highlights || [],
+      status: llmSummary ? 'analyzed' : 'basic'
+    };
+  } catch (err: any) {
+    // Fallback: return file size and note the error
+    const stats = await fs.promises.stat(filePath);
+    console.error('DOCX processing error:', err?.message || err);
+    const errorMsg = String(err?.message || err);
+    return { 
+      type: 'docx', 
+      size: stats.size, 
+      error: errorMsg,
+      summary: `Unable to extract text from DOCX file: ${errorMsg}. Please ensure office-text-extractor is installed.`,
+      note: 'DOCX extraction failed. Install office-text-extractor: npm install office-text-extractor',
+      status: 'error'
+    };
+  }
+}
+
+async function processImage(filePath: string, provider: LLMProvider = 'ondevice', model?: string) {
   const stats = await fs.promises.stat(filePath);
   const filename = path.basename(filePath);
 
   // Attempt AI-powered image analysis
   try {
-    const analysis = await analyzeImage(filePath);
+    const analysis = await analyzeImage(filePath, provider, model);
 
     // Attempt OCR (multimodal enhancement)
     const ocrText = await performOCR(filePath).catch(() => null);
@@ -173,21 +244,52 @@ async function processVideo(filePath: string) {
   // Attempt AI-powered video analysis
   try {
     const analysis = await analyzeVideo(filePath);
+    
+    // Generate summary from available data
+    let summary = analysis.summary;
+    
+    // If no summary but we have scenes, create one from scenes
+    if (!summary && analysis.scenes && analysis.scenes.length > 0) {
+      const sceneDescriptions = analysis.scenes
+        .map((s: any) => typeof s === 'string' ? s : s.description || s)
+        .filter(Boolean);
+      summary = `Video contains ${sceneDescriptions.length} scene(s): ${sceneDescriptions.join('. ')}.`;
+    }
+    
+    // If no summary but we have actions, create one from actions
+    if (!summary && analysis.actions && analysis.actions.length > 0) {
+      summary = `Video contains detected actions: ${analysis.actions.join(', ')}.`;
+    }
+    
+    // If no summary but we have duration, create a basic one
+    if (!summary) {
+      if (analysis.duration) {
+        const minutes = Math.floor(analysis.duration / 60);
+        const seconds = Math.floor(analysis.duration % 60);
+        summary = `Video file (${minutes}m ${seconds}s). ${analysis.scenes?.length || 0} scene(s) analyzed.`;
+      } else {
+        const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+        summary = `Video file (${sizeMB}MB). Analysis completed.`;
+      }
+    }
+    
     return {
       type: 'video',
       size: stats.size,
       duration: analysis.duration || null,
       scenes: analysis.scenes || [],
       actions: analysis.actions || [],
-      summary: analysis.summary || null,
+      summary: summary,
       status: 'analyzed',
       aiPowered: true
     };
   } catch (err: any) {
-    // Fallback: basic metadata
+    // Fallback: basic metadata with a summary
+    const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
     return {
       type: 'video',
       size: stats.size,
+      summary: `Video file: ${filename} (${sizeMB}MB). AI analysis was unavailable.`,
       status: 'basic',
       aiPowered: false,
       note: `Video saved as ${filename}. AI analysis unavailable.`

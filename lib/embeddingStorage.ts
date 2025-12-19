@@ -21,18 +21,32 @@ export async function generateAndStoreEmbedding(
     const embeddingText = generateEmbeddingText(fileInfo);
     
     if (!embeddingText || embeddingText === 'No content available') {
-      console.warn('No embedding text available for file');
+      console.warn('No embedding text available for file', {
+        type: fileInfo?.type,
+        hasSummary: !!fileInfo?.summary,
+        hasScenes: !!fileInfo?.scenes,
+        hasActions: !!fileInfo?.actions,
+        hasHighlights: !!fileInfo?.highlights,
+        hasTags: !!fileInfo?.tags
+      });
       return null;
     }
+
+    console.log('Generated embedding text length:', embeddingText.length, 'chars');
 
     // Generate embedding vector
     const embedding = await generateEmbedding(embeddingText, provider, model);
     
     if (!embedding || embedding.length === 0) {
-      console.warn('Failed to generate embedding');
+      console.warn('Failed to generate embedding vector', {
+        provider,
+        model,
+        textLength: embeddingText.length
+      });
       return null;
     }
 
+    console.log('Generated embedding vector dimension:', embedding.length);
     return embedding;
   } catch (err: any) {
     console.error('Error generating embedding:', err?.message || err);
@@ -49,11 +63,31 @@ export async function storeEmbeddingInDB(
   embedding: number[]
 ): Promise<boolean> {
   try {
+    // Validate embedding before storing
+    if (!embedding || !Array.isArray(embedding)) {
+      console.error(`Invalid embedding for ${filename}: not an array`, typeof embedding);
+      return false;
+    }
+    
+    if (embedding.length === 0) {
+      console.error(`Invalid embedding for ${filename}: empty array`);
+      return false;
+    }
+    
+    // Check for invalid values (NaN, Infinity, etc.)
+    const hasInvalidValues = embedding.some(val => !Number.isFinite(val));
+    if (hasInvalidValues) {
+      console.error(`Invalid embedding for ${filename}: contains non-finite values`);
+      return false;
+    }
+
     const supabase = supabaseServer();
     if (!supabase) {
       console.warn('Supabase not configured, cannot store embedding');
       return false;
     }
+
+    console.log(`Storing embedding for ${filename}: dimension ${embedding.length}`);
 
     // Update the file record with embedding
     const { error } = await supabase
@@ -66,6 +100,7 @@ export async function storeEmbeddingInDB(
       return false;
     }
 
+    console.log(`Successfully stored embedding for ${filename}`);
     return true;
   } catch (err: any) {
     console.error('Exception storing embedding:', err?.message || err);
@@ -95,4 +130,11 @@ export async function processAndStoreEmbedding(
     return false;
   }
 }
+
+
+
+
+
+
+
 

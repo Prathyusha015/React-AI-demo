@@ -70,6 +70,8 @@ export async function POST(request: Request) {
     let mimeType: string | undefined;
     if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) mimeType = 'image';
     else if (ext === '.pdf') mimeType = 'application/pdf';
+    else if (['.docx', '.doc'].includes(ext)) mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    else if (['.mp4', '.mov', '.webm', '.mkv'].includes(ext)) mimeType = 'video';
 
     const info: any = await processFile(processingPath, mimeType, provider as 'ondevice' | 'openrouter', model || undefined);
 
@@ -83,9 +85,19 @@ export async function POST(request: Request) {
       console.log(`Reprocess: Updating Supabase record for ${filename}...`);
       await supabase.from('files').update({ info, reprocessed_at: new Date().toISOString() }).eq('filename', filename);
 
-      // Background embedding generation
-      processAndStoreEmbedding(info, filename, provider as 'ondevice' | 'openrouter', model || undefined)
-        .catch(err => console.error('Reprocess: Embedding generation background error:', err));
+      // Generate and store embedding (await to ensure it completes)
+      console.log(`Reprocess: Generating embedding for ${filename}...`);
+      try {
+        const embeddingSuccess = await processAndStoreEmbedding(info, filename, provider as 'ondevice' | 'openrouter', model || undefined);
+        if (embeddingSuccess) {
+          console.log(`Reprocess: Successfully generated and stored embedding for ${filename}`);
+        } else {
+          console.warn(`Reprocess: Failed to generate embedding for ${filename} - file may have insufficient metadata`);
+        }
+      } catch (err: any) {
+        console.error('Reprocess: Embedding generation error:', err?.message || err);
+        // Don't fail the entire reprocess if embedding fails
+      }
     }
 
     const metaDir = path.join(process.cwd(), 'public', 'uploads');

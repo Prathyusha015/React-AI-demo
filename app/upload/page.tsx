@@ -24,7 +24,7 @@ export default function UploadPage() {
           <h3 className="text-sm font-semibold text-blue-800 mb-2">📋 Supported File Types</h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-blue-700">
             <div>
-              <span className="font-medium">Documents:</span> PDF, TXT
+              <span className="font-medium">Documents:</span> PDF, DOCX, TXT
             </div>
             <div>
               <span className="font-medium">Data:</span> CSV
@@ -41,6 +41,13 @@ export default function UploadPage() {
     </div>
   );
 }
+
+
+
+
+
+
+
 
 
 

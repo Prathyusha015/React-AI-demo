@@ -37,9 +37,31 @@ async function generateEmbeddingWithOpenRouter(
       return await generateEmbeddingOnDevice(text);
     }
 
+    // Embeddings require embedding models, not chat models
+    // If a chat model is passed, use default embedding model instead
+    // Ensure model is always a string (never an object)
+    let modelStr: string | null = null;
+    if (model) {
+      if (typeof model === 'string') {
+        modelStr = model;
+      } else if (typeof model === 'object') {
+        console.warn('Model parameter is an object, ignoring and using default embedding model');
+        modelStr = null;
+      } else {
+        modelStr = String(model);
+      }
+    }
+    
+    const chatModelPatterns = ['gpt-', 'claude', 'gemini', 'llama', 'chat', 'completion'];
+    const isChatModel = modelStr && chatModelPatterns.some(pattern => modelStr!.toLowerCase().includes(pattern));
+    
     // Default to OpenAI text-embedding-3-small (good balance of quality and cost)
     // Other options: text-embedding-3-large, text-embedding-ada-002
-    const selectedModel = model || 'openai/text-embedding-3-small';
+    const embeddingModel = (isChatModel ? null : modelStr) || 'openai/text-embedding-3-small';
+    
+    if (isChatModel && modelStr) {
+      console.log(`Chat model "${modelStr}" doesn't support embeddings, using default embedding model: ${embeddingModel}`);
+    }
 
     const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
       method: 'POST',
@@ -50,7 +72,7 @@ async function generateEmbeddingWithOpenRouter(
         'X-Title': 'AI Dashboard',
       },
       body: JSON.stringify({
-        model: selectedModel,
+        model: embeddingModel,
         input: text.substring(0, 8000), // Limit input length
       }),
     });
@@ -179,6 +201,30 @@ export function generateEmbeddingText(fileInfo: any): string {
     parts.push(fileInfo.scene);
   }
 
+  // Add video scenes (array of scene descriptions with timestamps)
+  if (fileInfo.type === 'video' && fileInfo.scenes && Array.isArray(fileInfo.scenes)) {
+    const sceneDescriptions = fileInfo.scenes
+      .map((s: any) => typeof s === 'string' ? s : s.description || s)
+      .filter(Boolean);
+    if (sceneDescriptions.length > 0) {
+      parts.push(`Video scenes: ${sceneDescriptions.join('. ')}`);
+    }
+  }
+
+  // Add video actions (detected actions/objects in video)
+  if (fileInfo.type === 'video' && fileInfo.actions && Array.isArray(fileInfo.actions)) {
+    if (fileInfo.actions.length > 0) {
+      parts.push(`Detected actions: ${fileInfo.actions.join(', ')}`);
+    }
+  }
+
+  // Add video duration for context
+  if (fileInfo.type === 'video' && fileInfo.duration) {
+    const minutes = Math.floor(fileInfo.duration / 60);
+    const seconds = Math.floor(fileInfo.duration % 60);
+    parts.push(`Video duration: ${minutes}m ${seconds}s`);
+  }
+
   // Add CSV column names and stats
   if (fileInfo.type === 'csv' && fileInfo.columns) {
     parts.push(`Columns: ${fileInfo.columns.join(', ')}`);
@@ -191,6 +237,15 @@ export function generateEmbeddingText(fileInfo: any): string {
   // Add file type
   if (fileInfo.type) {
     parts.push(`File type: ${fileInfo.type}`);
+  }
+
+  // Fallback for videos with minimal metadata - at least describe it as a video
+  if (fileInfo.type === 'video' && parts.length === 1 && parts[0] === `File type: ${fileInfo.type}`) {
+    parts.push('Video file with no detailed analysis available');
+    if (fileInfo.size) {
+      const sizeMB = (fileInfo.size / 1024 / 1024).toFixed(2);
+      parts.push(`File size: ${sizeMB}MB`);
+    }
   }
 
   // Combine all parts
@@ -226,4 +281,11 @@ export function cosineSimilarity(vec1: number[], vec2: number[]): number {
 
   return dotProduct / denominator;
 }
+
+
+
+
+
+
+
 
