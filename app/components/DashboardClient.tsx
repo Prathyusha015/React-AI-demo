@@ -1,31 +1,18 @@
 "use client";
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Pie, Bar, Line } from 'react-chartjs-2';
 import {
-  Chart as ChartJS,
-  ArcElement,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
   Tooltip,
   Legend,
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  PointElement,
-  LineElement,
-  Title,
-} from 'chart.js';
-
-ChartJS.register(
-  ArcElement,
-  Tooltip,
-  Legend,
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  PointElement,
-  LineElement,
-  Title
-);
+} from 'recharts';
 
 export default function DashboardClient() {
   const [files, setFiles] = useState<Array<any>>([]);
@@ -393,43 +380,28 @@ export default function DashboardClient() {
     const t = f.info?.type || 'unknown';
     acc[t] = (acc[t] || 0) + 1;
     return acc;
-  }, {});
+  }, {} as Record<string, number>);
 
-  const labels = Object.keys(counts);
-  const pieData = {
-    labels,
-    datasets: [
-      {
-        label: 'Files by type',
-        data: labels.map(l => counts[l]),
-        backgroundColor: ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'],
-        borderWidth: 2,
-        borderColor: '#fff',
-      },
-    ],
-  };
+  const pieLabels = Object.keys(counts);
+  const pieChartData = pieLabels.map(label => ({
+    type: label,
+    value: counts[label],
+  }));
+
+  const pieColors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'];
 
   // Get CSV trend data for visualization
   const csvFiles = files.filter(f => f.info?.type === 'csv' && f.info?.trends);
-  let trendData: any = null;
+  let trendChartData: Array<{ key: string; changePercent: number; trend: string }> | null = null;
   if (csvFiles.length > 0) {
     const firstCSV = csvFiles[0];
     const trends = firstCSV.info.trends;
     const trendLabels = Object.keys(trends);
-    trendData = {
-      labels: trendLabels,
-      datasets: [
-        {
-          label: 'Trend Change %',
-          data: trendLabels.map(k => trends[k].changePercent),
-          backgroundColor: trendLabels.map((k, i) =>
-            trends[k].trend === 'increasing' ? '#10B981' :
-              trends[k].trend === 'decreasing' ? '#EF4444' : '#6B7280'
-          ),
-          borderWidth: 1,
-        },
-      ],
-    };
+    trendChartData = trendLabels.map((key) => ({
+      key,
+      changePercent: trends[key].changePercent,
+      trend: trends[key].trend,
+    }));
   }
 
   const getStatusBadge = (status: string, aiPowered?: boolean) => {
@@ -589,20 +561,67 @@ export default function DashboardClient() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
               <h3 className="text-sm font-semibold text-gray-700 mb-3">File Type Distribution</h3>
-              {labels.length > 0 ? (
+              {pieChartData.length > 0 ? (
                 <div className="h-64">
-                  <Pie data={pieData} options={{ maintainAspectRatio: false, responsive: true }} />
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieChartData}
+                        dataKey="value"
+                        nameKey="type"
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={80}
+                        label
+                      >
+                        {pieChartData.map((entry, index) => (
+                          <Cell
+                            key={`cell-${entry.type}`}
+                            fill={pieColors[index % pieColors.length]}
+                          />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
                 </div>
               ) : (
                 <div className="h-64 flex items-center justify-center text-gray-400">No data</div>
               )}
             </div>
 
-            {trendData && (
+            {trendChartData && (
               <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">CSV Trend Analysis</h3>
                 <div className="h-64">
-                  <Bar data={trendData} options={{ maintainAspectRatio: false, responsive: true }} />
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={trendChartData}>
+                      <XAxis dataKey="key" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Bar
+                        dataKey="changePercent"
+                        name="Trend Change %"
+                      >
+                        {trendChartData.map((entry) => {
+                          const color =
+                            entry.trend === 'increasing'
+                              ? '#10B981'
+                              : entry.trend === 'decreasing'
+                              ? '#EF4444'
+                              : '#6B7280';
+                          return (
+                            <Cell
+                              key={entry.key}
+                              fill={color}
+                            />
+                          );
+                        })}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
             )}
