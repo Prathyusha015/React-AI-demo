@@ -234,7 +234,7 @@ export async function GET(request: Request) {
                     // Merge and deduplicate results
                     const allResults = [...allScoredFiles, ...keywordOnlyResults];
                     const uniqueResults = allResults.filter((item, index, self) =>
-                      index === self.findIndex((t) => t.filename === item.filename)
+                      index === self.findIndex((t) => t != null && t.filename === item.filename)
                     );
                     const sortedResults = uniqueResults
                       .sort((a: any, b: any) => b.similarity - a.similarity)
