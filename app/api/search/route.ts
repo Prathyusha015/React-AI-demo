@@ -233,8 +233,9 @@ export async function GET(request: Request) {
                     console.log(`Found ${keywordOnlyResults.length} additional keyword-only matches`);
                     // Merge and deduplicate results
                     const allResults = [...allScoredFiles, ...keywordOnlyResults];
-                    const uniqueResults = allResults.filter((item, index, self) =>
-                      index === self.findIndex((t) => t != null && t.filename === item.filename)
+                    const uniqueResults = allResults.filter((item: any, index: number, self: any[]) =>
+                      item != null &&
+                      index === self.findIndex((t: any) => t != null && t.filename === item.filename)
                     );
                     const sortedResults = uniqueResults
                       .sort((a: any, b: any) => b.similarity - a.similarity)
